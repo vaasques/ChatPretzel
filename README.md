@@ -6,13 +6,16 @@
 
 An unofficial lightweight macOS client for ChatGPT.
 
-ChatPretzel exists for people who prefer a small, focused desktop window instead of keeping another browser tab open. It uses Swift, AppKit, and the WebKit engine already included with macOS. It does not bundle Electron or Chromium and does not require an OpenAI API key.
+ChatPretzel is for people who loved the focused ChatGPT Classic experience and still want ChatGPT in its own lightweight Mac window. As the official macOS app changed, many of us found that it no longer fit this simple workflow or worked reliably enough for our needs. We decided to build the alternative we wanted ourselves.
+
+It keeps regular ChatGPT separate from Codex, so the two can run side by side: Codex for project and agent work, and ChatPretzel for conversations, research, and everyday questions. ChatPretzel uses Swift, AppKit, and the WebKit engine already included with macOS. It does not bundle Electron or Chromium and does not require an OpenAI API key.
 
 ## Features
 
 - A single native macOS window for the regular ChatGPT website
+- Runs as a separate app alongside Codex
 - Normal ChatGPT login and session handling through WebKit
-- Experimental Finder file paste, plus normal file selection and download handling
+- Multi-format attachments through normal file selection, with experimental batch paste from Finder
 - Local prompts, bookmarks, notes, and draft tools
 - Search, zoom, reading width, and a global window shortcut
 - Plain-text copying that avoids dark text formatting when pasting into Outlook
