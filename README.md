@@ -23,7 +23,9 @@ It keeps regular ChatGPT separate from Codex, so the two can run side by side: C
 
 ## Download and use
 
-Download the [latest ChatPretzel DMG installer from GitHub Releases](https://github.com/vaasques/ChatPretzel/releases/latest), open it, and drag `ChatPretzel.app` to Applications. Then open the app and sign in to ChatGPT normally.
+Download the [latest ChatPretzel DMG installer from GitHub Releases](https://github.com/vaasques/ChatPretzel/releases/latest), open it, and drag `ChatPretzel.app` to Applications. Then open the app and sign in to ChatGPT with your account password.
+
+**Sign-in note:** Passkey sign-in does not currently work reliably inside ChatPretzel's embedded WebKit window. If ChatGPT or Google offers a passkey, choose another sign-in method and enter your password instead. An OpenAI API key is not required.
 
 The current downloadable build is made for Apple Silicon, ad-hoc signed, and not notarized. macOS may therefore show its normal warning for software downloaded outside the App Store. The source is available here for inspection.
 

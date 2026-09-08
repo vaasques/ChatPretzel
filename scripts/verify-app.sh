@@ -2,8 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-APP="$ROOT/dist/ChatPretzel.app"
-[[ "$(uname -s)" == Darwin && -d "$APP" ]] || { echo 'BLOCKED: inget native Mac-bygge att kontrollera.' >&2; exit 2; }
+APP="${CHATPRETZEL_APP_PATH:-$ROOT/dist/ChatPretzel.app}"
+[[ "$(uname -s)" == Darwin && -d "$APP" ]] || { echo 'BLOCKED: no native Mac build is available for verification.' >&2; exit 2; }
 mkdir -p test-results
 [[ -f "$APP/Contents/Resources/ChatDeskAssets/Adapter.js" ]]
 [[ -f "$APP/Contents/Resources/ChatDeskAssets/ClipboardFixture.html" ]]
@@ -12,9 +12,9 @@ mkdir -p test-results
 /usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' test-results/mac-entitlements.plist | grep -qx true
 /usr/bin/otool -L "$APP/Contents/MacOS/ChatPretzel" > test-results/mac-linked-libraries.txt
 if find "$APP" \( -iname '*Electron*' -o -iname '*Chromium*' -o -iname '*QtWebEngine*' -o -name node -o -name python3 \) -print | grep -q .; then
-  echo 'FAIL: förbjuden runtime i app-paketet.' >&2; exit 1
+  echo 'FAIL: prohibited runtime found in the app bundle.' >&2; exit 1
 fi
 SIZE_KIB="$(du -sk "$APP" | awk '{print $1}')"
-printf 'Installerad .app-storlek: %s KiB\n' "$SIZE_KIB" | tee test-results/mac-app-size.txt
-if (( SIZE_KIB > 30720 )); then echo 'FAIL: app-paketet överstiger budgeten 30 MiB.' >&2; exit 1; fi
-echo 'PASS-package: storlek, resurser och signatur kontrollerade. Detta är inte ett live-paste-test.'
+printf 'Installed .app size: %s KiB\n' "$SIZE_KIB" | tee test-results/mac-app-size.txt
+if (( SIZE_KIB > 30720 )); then echo 'FAIL: app bundle exceeds the 30 MiB budget.' >&2; exit 1; fi
+echo 'PASS-package: size, resources, and signature verified. This is not a live paste test.'
