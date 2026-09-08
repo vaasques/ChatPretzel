@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="sv"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'">
+<title>ChatPretzel • lokal filmottagare</title>
+<style>
+:root{color-scheme:light dark;font:15px -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+body{max-width:960px;margin:30px auto;padding:0 24px;line-height:1.5}
+h1{font-size:25px;margin-bottom:6px}p{margin:8px 0 16px}.muted{opacity:.72}
+textarea{box-sizing:border-box;width:100%;min-height:120px;padding:14px;font:inherit;resize:vertical}
+input,button{font:inherit;margin:8px 12px 8px 0;padding:8px}table{border-collapse:collapse;width:100%;margin-top:20px}
+th,td{border-bottom:1px solid #8886;text-align:left;padding:9px;vertical-align:top}
+code{font-size:12px;word-break:break-all}.ok{font-weight:650}.banner{padding:14px;border:1px solid #8886;border-radius:8px}
+</style></head><body>
+<h1>Lokal filmottagare</h1>
+<p class="muted">Detta är inte ChatGPT. Inga filer eller testresultat skickas till nätverket.</p>
+<p class="banner">Markera alla sex filer i <code>Fixtures/files</code> i Finder. Tryck Cmd+C, fokusera fältet nedan och tryck Cmd+V en gång. Jämför antalet och SHA-256 mot de medföljande originalen.</p>
+<form id="fixture-form">
+<label for="prompt-textarea">Testkompositor – befintlig text ska finnas kvar</label>
+<textarea id="prompt-textarea" data-chatdesk-fixture-composer placeholder="Skriv exempelvis BEHÅLL DEN HÄR TEXTEN innan du klistrar in filerna."></textarea>
+<div><input type="file" id="fixture-files" multiple aria-label="Välj testfiler"><button type="button" id="reset">Rensa mottagna filer</button><button type="button" id="report">Spara lokal testrapport</button></div>
+</form>
+<p id="summary" role="status">0 filer mottagna.</p>
+<table><thead><tr><th>Fil</th><th>Bytes</th><th>Lokal kontroll</th></tr></thead><tbody id="results"></tbody></table>
+<p class="muted">Hashkontrollen gäller enbart filer som webbvyn faktiskt kan läsa. Den bevisar inte Finder-behörigheter i en annan app, ChatGPTs serveruppladdning eller att blandad Cmd+V fungerar live.</p>
+<script>
+'use strict';
+const EXPECTED = [
+  {
+    "name": "01 prov åäö.pdf",
+    "size": 1630,
+    "sha256": "ee6ae8af12e9547c6f45002d13b6e46024ad2bd28b17871d0cc98fa8e2faa65c"
+  },
+  {
+    "name": "02 prov åäö.docx",
+    "size": 36771,
+    "sha256": "b1cce219fba5bf28100a3e6f30269eacc5a297fa8866feed70d9d3e1dac367bc"
+  },
+  {
+    "name": "03 prov åäö.xlsx",
+    "size": 3602,
+    "sha256": "a5810e13859a47cd6eb95b519ea7dca93389e15b10f4eea9f627ca17e8716bef"
+  },
+  {
+    "name": "04 prov åäö.png",
+    "size": 10348,
+    "sha256": "f49c0bbb415e716020d595b3e3704a6b4a83e769a6d323c2f7b903fae8cc76c4"
+  },
+  {
+    "name": "05 prov åäö.jpg",
+    "size": 13234,
+    "sha256": "004fe7f713a7262422622b0f64f54637e341f828b21e893ab944ad5104338307"
+  },
+  {
+    "name": "06 prov åäö.txt",
+    "size": 117,
+    "sha256": "27efa2b1d4685b7e0a0a7a4a982fe6aa3622c640c2ac76a2fd3f0cc3e13b39b0"
+  }
+]
+;
+window.fixtureReport = {scope:'local-browser-file-bytes-only', files:[], operations:0, submitted:0, pending:0};
+const rows = document.getElementById('results'), summary = document.getElementById('summary');
+let epoch = 0;
+function render() {
+  rows.replaceChildren();
+  for (const file of window.fixtureReport.files) {
+    const row = document.createElement('tr');
+    for (const text of [file.name, String(file.size), (file.matchesExpected===true?'PASS – originalbytes':file.matchesExpected===false?'FAIL – bytes avviker':'Ej jämförd')+' / '+(file.sha256||file.error||'')]) {
+      const cell=document.createElement('td'); cell.textContent=text; row.append(cell);
+    }
+    rows.append(row);
+  }
+  const count=window.fixtureReport.files.length;
+  summary.textContent=`${count} filer mottagna. ${window.fixtureReport.pending} kontroller återstår. Formuläret har skickats ${window.fixtureReport.submitted} gånger.`;
+}
+async function receive(files, source) {
+  const captured=Array.from(files), currentEpoch=epoch;
+  window.fixtureReport.operations++;
+  window.fixtureReport.pending+=captured.length;
+  render();
+  for (const file of captured) {
+    let digest=null,error=null;
+    try {
+      if(file.size>8*1024*1024) throw new Error('Fixturegräns 8 MiB per fil; appens URL-överföring har inte denna gräns');
+      if(!crypto.subtle) throw new Error('Web Crypto saknas i denna testmiljö');
+      digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');
+    } catch(e){error=String(e.message||e);}
+    if(currentEpoch!==epoch) return;
+    const expected=EXPECTED.find(e=>e.name.normalize('NFC')===file.name.normalize('NFC'));
+    const matchesExpected=expected&&digest!==null ? expected.sha256===digest&&expected.size===file.size : null;
+    window.fixtureReport.files.push({name:file.name,size:file.size,type:file.type,sha256:digest,matchesExpected,error,source});
+    window.fixtureReport.pending--;render();
+  }
+}
+document.getElementById('fixture-files').addEventListener('change',event=>{
+  const selected=Array.from(event.target.files);event.target.value='';receive(selected,'real-file-input-change');
+});
+const editor=document.getElementById('prompt-textarea');
+editor.addEventListener('paste',event=>{
+  if(event.clipboardData?.files?.length){event.preventDefault();receive(event.clipboardData.files,'browser-paste-files');}
+});
+editor.addEventListener('dragover',event=>event.preventDefault());
+editor.addEventListener('drop',event=>{
+  if(event.dataTransfer?.files?.length){event.preventDefault();receive(event.dataTransfer.files,'browser-drop-files');}
+});
+document.getElementById('fixture-form').addEventListener('submit',event=>{event.preventDefault();window.fixtureReport.submitted++;render();});
+document.getElementById('reset').addEventListener('click',()=>{epoch++;window.fixtureReport={scope:'local-browser-file-bytes-only',files:[],operations:0,submitted:0,pending:0};render();});
+document.getElementById('report').addEventListener('click',()=>{
+  const blob=new Blob([JSON.stringify(window.fixtureReport,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='ChatPretzel-local-file-report.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
+});
+editor.focus();
+</script></body></html>
