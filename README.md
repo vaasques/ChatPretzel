@@ -30,7 +30,7 @@ To build from source, use macOS 13 or later with a matching Apple Swift toolchai
 bash scripts/build.sh
 ```
 
-The finished app is placed in `dist/ChatPretzel.app`. Build and test details are documented in [TEST_REPORT_MACOS.md](TEST_REPORT_MACOS.md).
+The finished app is placed in `dist/ChatPretzel.app`.
 
 ## Support ChatPretzel
 

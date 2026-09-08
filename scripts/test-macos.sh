@@ -6,4 +6,4 @@ cd "$ROOT"
 mkdir -p test-results
 printf '%s\n' 'Testerna öppnar en lokal WebKit-testvy. De besöker inte ChatGPT och ändrar inte det vanliga urklippet.'
 xcrun swift test 2>&1 | tee test-results/macos-tests.txt
-printf '\nLokala Mac-tester klara. Kör sedan det MANUELLA Finder- och ChatGPT-testet i CLIPBOARD_TESTS.md.\n'
+printf '\nLokala Mac-tester klara. Kör sedan de manuella Finder- och ChatGPT-testerna.\n'

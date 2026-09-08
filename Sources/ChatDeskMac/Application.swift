@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func about() {
         let alert = NSAlert(); alert.messageText = "ChatPretzel 0.1.3 • lokal utvecklingsversion"
-        alert.informativeText = "Swift + AppKit + systemets WebKit. Ingen Electron eller separat AI-betalning i appen.\n\nInget officiellt OpenAI-program. Native bygge, inloggning, blandad paste och verklig resursförbrukning måste verifieras på Mac. Se TEST_REPORT.md i källkodspaketet."
+        alert.informativeText = "Swift + AppKit + systemets WebKit. Ingen Electron eller separat AI-betalning i appen.\n\nInget officiellt OpenAI-program. Native bygge, inloggning, blandad paste och verklig resursförbrukning måste verifieras på Mac."
         alert.runModal()
     }
     @objc private func testStatus() {
