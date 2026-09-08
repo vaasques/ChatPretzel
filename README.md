@@ -23,7 +23,7 @@ It keeps regular ChatGPT separate from Codex, so the two can run side by side: C
 
 ## Download and use
 
-Download the [ChatPretzel DMG installer from Gumroad](https://prooveva.gumroad.com/l/chatpretzel), open it, and drag `ChatPretzel.app` to Applications. Then open the app and sign in to ChatGPT normally.
+Download the [latest ChatPretzel DMG installer from GitHub Releases](https://github.com/vaasques/ChatPretzel/releases/latest), open it, and drag `ChatPretzel.app` to Applications. Then open the app and sign in to ChatGPT normally.
 
 The current downloadable build is made for Apple Silicon, ad-hoc signed, and not notarized. macOS may therefore show its normal warning for software downloaded outside the App Store. The source is available here for inspection.
 
@@ -37,9 +37,13 @@ The finished app is placed in `dist/ChatPretzel.app`.
 
 ## Support ChatPretzel
 
-ChatPretzel is free and open source. If you find it useful, you can support continued development through Gumroad.
+ChatPretzel is free and open source. If you find it useful, you can support continued development with a crypto donation:
 
-[Download ChatPretzel or support the project on Gumroad.](https://prooveva.gumroad.com/l/chatpretzel)
+- **Bitcoin (BTC), Bitcoin network:** `3JAw4YbohcMSX89LPWEnZLf5WBWAfHn887`
+- **Ethereum (ETH), Ethereum (ERC20) network:** `0xebcd637468096ac8dd6ed7c10342edac8fc4ba46`
+- **USD Coin (USDC), Solana network:** `DLxwmRNF8BHSkaBx9ieJLQwc46dgFvRuSuyrGTkSndrh`
+
+Send only the listed asset using the exact network shown. Crypto transfers are irreversible, and funds sent using the wrong asset or network may be lost.
 
 ## Unofficial project
 
