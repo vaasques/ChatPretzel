@@ -20,7 +20,7 @@ ChatPretzel exists for people who prefer a small, focused desktop window instead
 
 ## Download and use
 
-Download the current macOS ZIP from the ChatPretzel Gumroad page, unpack it, and move `ChatPretzel.app` to Applications. Open the app and sign in to ChatGPT normally.
+Download the [ChatPretzel DMG installer from Gumroad](https://prooveva.gumroad.com/l/chatpretzel), open it, and drag `ChatPretzel.app` to Applications. Then open the app and sign in to ChatGPT normally.
 
 The current downloadable build is made for Apple Silicon, ad-hoc signed, and not notarized. macOS may therefore show its normal warning for software downloaded outside the App Store. The source is available here for inspection.
 
@@ -36,7 +36,7 @@ The finished app is placed in `dist/ChatPretzel.app`. Build and test details are
 
 ChatPretzel is free and open source. If you find it useful, you can support continued development through Gumroad.
 
-The Gumroad link will be added here when the product page is live.
+[Download ChatPretzel or support the project on Gumroad.](https://prooveva.gumroad.com/l/chatpretzel)
 
 ## Unofficial project
 
