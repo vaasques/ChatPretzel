@@ -23,7 +23,7 @@ final class WebAdapter {
                        "getDraft", "insertText", "applyReading", "teardown"]
         guard allowed.contains(method) else { completion(.failure(AdapterError.disallowedPage)); return }
         webView.callAsyncJavaScript(
-            "if (!globalThis.ChatDeskAdapter) return {ok:false,error:'Adapter saknas på sidan'}; return globalThis.ChatDeskAdapter[method](args);",
+            "if (!globalThis.ChatDeskAdapter) return {ok:false,error:'The adapter is missing from the page'}; return globalThis.ChatDeskAdapter[method](args);",
             arguments: ["method": method, "args": arguments], in: nil, in: Self.world) { result in
                 switch result {
                 case .success(let value):

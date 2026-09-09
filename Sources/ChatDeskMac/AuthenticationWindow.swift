@@ -15,7 +15,7 @@ final class AuthenticationWindow: NSWindowController, WKUIDelegate, WKNavigation
         webView = WKWebView(frame: .zero, configuration: configuration)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 740),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "ChatPretzel • inloggning"; window.isReleasedWhenClosed = false
+        window.title = "ChatPretzel • Sign In"; window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = webView; window.delegate = self
         webView.uiDelegate = self; webView.navigationDelegate = self
@@ -32,7 +32,7 @@ final class AuthenticationWindow: NSWindowController, WKUIDelegate, WKNavigation
             decisionHandler(.cancel)
             if let url = navigationAction.request.url { NSWorkspace.shared.open(url) }
         case .deny:
-            decisionHandler(.cancel); onNotice?("Inloggningen ville öppna en ej tillåten adress. Ingen säkerhetskontroll har stängts av.")
+            decisionHandler(.cancel); onNotice?("The sign-in flow tried to open a disallowed address. No security check was disabled.")
         }
     }
     func webViewDidClose(_ webView: WKWebView) { close() }
@@ -46,14 +46,14 @@ final class AuthenticationWindow: NSWindowController, WKUIDelegate, WKNavigation
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
         guard let window, window.attachedSheet == nil else { completionHandler(); return }
-        let alert = NSAlert(); alert.messageText = "Inloggningssidan"; alert.informativeText = String(message.prefix(2000))
+        let alert = NSAlert(); alert.messageText = "Sign-in Page"; alert.informativeText = String(message.prefix(2000))
         alert.beginSheetModal(for: window) { _ in completionHandler() }
     }
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         guard let window, window.attachedSheet == nil else { completionHandler(false); return }
-        let alert = NSAlert(); alert.messageText = "Inloggningssidan"; alert.informativeText = String(message.prefix(2000))
-        alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Avbryt")
+        let alert = NSAlert(); alert.messageText = "Sign-in Page"; alert.informativeText = String(message.prefix(2000))
+        alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
     }
 }

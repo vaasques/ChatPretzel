@@ -35,4 +35,42 @@ final class ClipboardReaderTests: XCTestCase {
         guard case .files(let selection) = ClipboardReader.read(board) else { XCTFail(); return }
         XCTAssertEqual(selection.urls.count, 2)
     }
+
+    func testMailRTFDAttachmentIsMaterializedWithoutUsingItsTextPreview() async throws {
+        let board = makePasteboard(); defer { board.releaseGlobally() }
+        let expected = Data("Mail attachment bytes".utf8)
+        let wrapper = FileWrapper(regularFileWithContents: expected)
+        wrapper.preferredFilename = "Mail attachment.txt"
+        let document = NSMutableAttributedString(string: "Text preview that must not become a filename or prompt")
+        document.append(NSAttributedString(attachment: NSTextAttachment(fileWrapper: wrapper)))
+        let rtfd = try document.data(from: NSRange(location: 0, length: document.length),
+                                     documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
+        let item = NSPasteboardItem()
+        item.setData(rtfd, forType: NSPasteboard.PasteboardType("com.apple.flat-rtfd"))
+        item.setString("Mail attachment.txt", forType: .string)
+        XCTAssertTrue(board.writeObjects([item]))
+
+        guard case .mailRichText(let copied, _) = ClipboardReader.read(board) else {
+            XCTFail("Expected Mail RTFD data"); return
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChatPretzel-mail-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = MailAttachmentMaterializer(rootDirectory: root)
+        let finished = expectation(description: "Mail attachment materialized")
+        materializer.receive(copied) { result in
+            switch result {
+            case .failure(let error): XCTFail("Mail attachment failed: \(error)")
+            case .success(nil): XCTFail("Expected one attachment")
+            case .success(let selection?):
+                XCTAssertEqual(selection.urls.count, 1)
+                XCTAssertEqual(selection.urls.first?.lastPathComponent, "Mail attachment.txt")
+                XCTAssertEqual(selection.urls.first.flatMap { try? Data(contentsOf: $0) }, expected)
+                materializer.release(selection.id)
+            }
+            finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 5)
+    }
 }

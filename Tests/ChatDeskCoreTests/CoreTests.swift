@@ -207,7 +207,7 @@ final class DraftAndTemplateTests: XCTestCase {
         buffer.removeAll(); XCTAssertEqual(buffer.count, 0)
     }
     func testPromptVariablesUniqueAndUnicode() {
-        XCTAssertEqual(PromptTemplate.variables(in: "{{task}} {{namn å}} {{task}}"), ["task", "namn å"])
+        XCTAssertEqual(PromptTemplate.variables(in: "{{task}} {{name å}} {{task}}"), ["task", "name å"])
     }
     func testPromptValuesNotRecursivelyExpanded() {
         XCTAssertEqual(PromptTemplate.render("{{one}} {{two}}", values: ["one":"{{two}}", "two":"done"]), "{{two}} done")

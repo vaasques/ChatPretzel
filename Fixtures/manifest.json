@@ -1,32 +1,32 @@
 [
   {
-    "name": "01 prov åäö.pdf",
+    "name": "01 sample åäö.pdf",
     "size": 1630,
     "sha256": "ee6ae8af12e9547c6f45002d13b6e46024ad2bd28b17871d0cc98fa8e2faa65c"
   },
   {
-    "name": "02 prov åäö.docx",
-    "size": 36771,
-    "sha256": "b1cce219fba5bf28100a3e6f30269eacc5a297fa8866feed70d9d3e1dac367bc"
+    "name": "02 sample åäö.docx",
+    "size": 36770,
+    "sha256": "e79a62954359ebee88be02f5535403a9fabee199f7c43038d7630d3d95d88fca"
   },
   {
-    "name": "03 prov åäö.xlsx",
-    "size": 3602,
-    "sha256": "a5810e13859a47cd6eb95b519ea7dca93389e15b10f4eea9f627ca17e8716bef"
+    "name": "03 sample åäö.xlsx",
+    "size": 3612,
+    "sha256": "5f5c36e9f8f0c3826014afad23a216651a52148412a0f9eb078f98e78a6d1d9a"
   },
   {
-    "name": "04 prov åäö.png",
+    "name": "04 sample åäö.png",
     "size": 10348,
     "sha256": "f49c0bbb415e716020d595b3e3704a6b4a83e769a6d323c2f7b903fae8cc76c4"
   },
   {
-    "name": "05 prov åäö.jpg",
+    "name": "05 sample åäö.jpg",
     "size": 13234,
     "sha256": "004fe7f713a7262422622b0f64f54637e341f828b21e893ab944ad5104338307"
   },
   {
-    "name": "06 prov åäö.txt",
-    "size": 117,
-    "sha256": "27efa2b1d4685b7e0a0a7a4a982fe6aa3622c640c2ac76a2fd3f0cc3e13b39b0"
+    "name": "06 sample åäö.txt",
+    "size": 119,
+    "sha256": "eb2b462d7d4b3e89a0bf7864b72c227ab95aafebacdbebe6e8553149904856e4"
   }
 ]

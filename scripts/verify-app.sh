@@ -10,6 +10,13 @@ mkdir -p test-results
 /usr/bin/codesign --verify --strict "$APP"
 /usr/bin/codesign -d --entitlements :- "$APP" > test-results/mac-entitlements.plist 2> test-results/mac-signature.txt
 /usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' test-results/mac-entitlements.plist | grep -qx true
+/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.microphone' test-results/mac-entitlements.plist | grep -qx true
+/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' test-results/mac-entitlements.plist | grep -qx true
+MICROPHONE_USAGE="$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP/Contents/Info.plist")"
+[[ -n "$MICROPHONE_USAGE" ]]
+if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' test-results/mac-entitlements.plist >/dev/null 2>&1; then
+  echo 'FAIL: the camera entitlement must remain disabled.' >&2; exit 1
+fi
 /usr/bin/otool -L "$APP/Contents/MacOS/ChatPretzel" > test-results/mac-linked-libraries.txt
 if find "$APP" \( -iname '*Electron*' -o -iname '*Chromium*' -o -iname '*QtWebEngine*' -o -name node -o -name python3 \) -print | grep -q .; then
   echo 'FAIL: prohibited runtime found in the app bundle.' >&2; exit 1

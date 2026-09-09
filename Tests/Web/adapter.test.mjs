@@ -53,30 +53,30 @@ test('Disconnected input cannot trigger',()=>{const e=environment();e.adapter.pr
 test('Manual cancellation invalidates validation',()=>{const e=environment();e.adapter.prepareFiles({token:'op',files});e.adapter.triggerFiles({token:'op'});e.adapter.cancelFiles();assert.equal(e.adapter.validateFiles({token:'op'}).ok,false);});
 test('Draft restore cannot overwrite nonempty editor',()=>{const e=environment();assert.equal(e.adapter.insertText({text:'old',onlyIfEmpty:true}).ok,false);assert.equal(e.composer.value,'keep');});
 test('Prompt insertion does not submit anything',()=>{const e=environment();assert.equal(e.adapter.insertText({text:' new'}).ok,true);assert.equal(e.composer.value,'keep new');assert.equal(e.calls.length,0);});
-test('Selected text is returned without HTML formatting',()=>{const e=environment({selectionText:'Svart HTML blir ren text'});const result=e.adapter.selectedText();assert.equal(result.ok,true);assert.equal(result.text,'Svart HTML blir ren text');});
+test('Selected text is returned without HTML formatting',()=>{const e=environment({selectionText:'Dark HTML becomes plain text'});const result=e.adapter.selectedText();assert.equal(result.ok,true);assert.equal(result.text,'Dark HTML becomes plain text');});
 test('Empty selection is not written to the clipboard',()=>{const result=environment().adapter.selectedText();assert.equal(result.ok,false);assert.equal(result.text,undefined);});
 test('Trusted copy exposes only plain text for Outlook',()=>{
-  const e=environment({selectionText:'Läsbar text'}),written=new Map();
+  const e=environment({selectionText:'Readable text'}),written=new Map();
   let prevented=false,stopped=false,cleared=false;
   e.listeners.get('copy')({isTrusted:true,clipboardData:{clearData(){cleared=true;written.clear()},setData(type,value){written.set(type,value)}},
     preventDefault(){prevented=true},stopImmediatePropagation(){stopped=true}});
   assert.equal(prevented,true);assert.equal(stopped,true);assert.equal(cleared,true);
-  assert.equal(written.get('text/plain'),'Läsbar text');assert.equal(written.has('text/html'),false);
+  assert.equal(written.get('text/plain'),'Readable text');assert.equal(written.has('text/html'),false);
 });
 test('Synthetic copy cannot write clipboard data',()=>{
-  const e=environment({selectionText:'hemlig'});let writes=0;
+  const e=environment({selectionText:'private'});let writes=0;
   e.listeners.get('copy')({isTrusted:false,clipboardData:{clearData(){writes++},setData(){writes++}},preventDefault(){writes++},stopImmediatePropagation(){writes++}});
   assert.equal(writes,0);
 });
 test('ChatGPT copy button writes the message as plain text',()=>{
-  const e=environment(),message={innerText:'Svar utan svart HTML'};
+  const e=environment(),message={innerText:'Answer without dark HTML'};
   const turn={querySelector:selector=>selector==='[data-message-author-role]'?message:null};
   const button={closest:selector=>selector==='[data-testid^="conversation-turn-"], article'?turn:null};
   const target={closest:selector=>selector==='[data-testid="copy-turn-action-button"]'?button:null};
   let prevented=false,stopped=false;
   e.listeners.get('click')({isTrusted:true,target,preventDefault(){prevented=true},stopImmediatePropagation(){stopped=true}});
   assert.equal(prevented,true);assert.equal(stopped,true);
-  assert.equal(e.copiedTypes.get('text/plain'),'Svar utan svart HTML');
+  assert.equal(e.copiedTypes.get('text/plain'),'Answer without dark HTML');
   assert.equal(e.copiedTypes.has('text/html'),false);
 });
 test('Temporary chat query is recognized',()=>{const e=environment();e.location.search='?temporary-chat=true';assert.equal(e.adapter.getDraft().temporary,true);});

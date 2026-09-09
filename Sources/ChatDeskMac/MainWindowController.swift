@@ -18,8 +18,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     private var downloadsPanel: DownloadsPanel?
     private var libraryPanel: LibraryPanel?
     private var settingsPanel: SettingsPanel?
+    private let mailAttachments = MailAttachmentMaterializer()
     private let webContainer = NSView()
-    private let status = NSTextField(labelWithString: "Utvecklingsversion • native Mac-bygge och ChatGPT-kompatibilitet måste testas")
+    private let status = NSTextField(labelWithString: "Development build • native Mac build and ChatGPT compatibility require testing")
     private let locationLabel = NSTextField(labelWithString: "chatgpt.com")
     private let progress = NSProgressIndicator()
     private let search = NSSearchField()
@@ -60,10 +61,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         guard let window else { return }
         let bar = NSStackView(); bar.spacing = 7; bar.alignment = .centerY
         let items: [(String, String, Selector)] = [
-            ("chevron.left", "Bakåt", #selector(back)), ("chevron.right", "Framåt", #selector(forward)),
-            ("plus", "Ny chatt", #selector(newChat)), ("arrow.clockwise", "Ladda om", #selector(reload)),
-            ("paperclip", "Välj flera filer", #selector(chooseFiles)), ("books.vertical", "Lokalt bibliotek", #selector(showLibrary)),
-            ("tray.full", "Bilagornas status", #selector(showTransfers)), ("arrow.down.to.line", "Nedladdningar", #selector(showDownloads))]
+            ("chevron.left", "Back", #selector(back)), ("chevron.right", "Forward", #selector(forward)),
+            ("plus", "New Chat", #selector(newChat)), ("arrow.clockwise", "Reload", #selector(reload)),
+            ("paperclip", "Choose Multiple Files", #selector(chooseFiles)), ("books.vertical", "Local Library", #selector(showLibrary)),
+            ("tray.full", "Attachment Status", #selector(showTransfers)), ("arrow.down.to.line", "Downloads", #selector(showDownloads))]
         for (symbol, title, action) in items {
             let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: title) ?? NSImage(), target: self, action: action)
             button.bezelStyle = .texturedRounded; button.toolTip = title; button.setAccessibilityLabel(title); bar.addArrangedSubview(button)
@@ -71,13 +72,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal); bar.addArrangedSubview(spacer)
         locationLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular); locationLabel.textColor = .secondaryLabelColor
         bar.addArrangedSubview(locationLabel)
-        let gear = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Inställningar") ?? NSImage(), target: self, action: #selector(showSettings))
-        gear.bezelStyle = .texturedRounded; gear.toolTip = "Inställningar"; bar.addArrangedSubview(gear)
+        let gear = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings") ?? NSImage(), target: self, action: #selector(showSettings))
+        gear.bezelStyle = .texturedRounded; gear.toolTip = "Settings"; bar.addArrangedSubview(gear)
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-        search.placeholderString = "Sök i sidan"; search.target = self; search.action = #selector(findNext); search.delegate = self
+        search.placeholderString = "Find on page"; search.target = self; search.action = #selector(findNext); search.delegate = self
         searchRow.addArrangedSubview(search)
-        searchRow.addArrangedSubview(NSButton(title: "Nästa", target: self, action: #selector(findNext)))
-        searchRow.addArrangedSubview(NSButton(title: "Stäng", target: self, action: #selector(hideSearch)))
+        searchRow.addArrangedSubview(NSButton(title: "Next", target: self, action: #selector(findNext)))
+        searchRow.addArrangedSubview(NSButton(title: "Close", target: self, action: #selector(hideSearch)))
         searchRow.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 6, right: 10); searchRow.spacing = 8; searchRow.isHidden = true
         progress.style = .bar; progress.minValue = 0; progress.maxValue = 1; progress.isIndeterminate = false; progress.isHidden = true
         progress.heightAnchor.constraint(equalToConstant: 2).isActive = true
@@ -102,7 +103,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         configuration.userContentController = WKUserContentController()
         if !effectiveSafeMode {
             do { try WebAdapter.install(on: configuration.userContentController, messageHandler: WeakScriptHandler(self)) }
-            catch { notice("Adapterresursen saknas. Grundwebben öppnas utan förbättringar.") }
+            catch { notice("The adapter resource is missing. The basic website will open without enhancements.") }
         }
         webView = NativeWebView(frame: .zero, configuration: configuration)
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -116,6 +117,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         attachments.generation = { [weak self] in self?.navigationGeneration ?? 0 }
         attachments.onNotice = { [weak self] in self?.notice($0) }
         attachments.onChange = { [weak self] in self?.transfersPanel?.refresh() }
+        attachments.onReleaseOperation = { [weak self] in self?.mailAttachments.release($0) }
         webView.mayHandleDrop = { [weak self] in
             guard let self else { return false }; return !self.effectiveSafeMode && self.preferences.assistedPaste && self.policy.allowsAdapter(self.webView.url)
         }
@@ -144,7 +146,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         guard observedURL != webView.url else { return }
         observedURL = webView.url; navigationGeneration &+= 1; knownDocumentID = nil
         attachments.navigationChanged()
-        locationLabel.stringValue = policy.isFixture(webView.url) ? "Lokalt filtest – ingen uppladdning" : (webView.url?.host ?? "")
+        locationLabel.stringValue = policy.isFixture(webView.url) ? "Local file test – no upload" : (webView.url?.host ?? "")
         if !policy.isChat(webView.url) { drafts.removeAll() }
         updateAdapterContext()
     }
@@ -166,12 +168,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     func prepareToQuit() -> Bool {
         if libraryPanel?.allowLeave() == false { return false }
         if !library.finishWrites() {
-            let alert = NSAlert(); alert.messageText = "Biblioteket är inte sparat på disk."
-            alert.informativeText = "Avbryt och exportera biblioteket för att behålla ändringarna."
-            alert.addButton(withTitle: "Avbryt"); alert.addButton(withTitle: "Avsluta ändå")
+            let alert = NSAlert(); alert.messageText = "The library has not been saved to disk."
+            alert.informativeText = "Cancel and export the library to keep your changes."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Quit Anyway")
             guard alert.runModal() == .alertSecondButtonReturn else { return false }
         }
-        attachments.cancel(); downloads.cancelAll()
+        attachments.cancel(); downloads.cancelAll(); mailAttachments.cleanupAll()
         for auth in authenticationWindows.values { auth.onClose = nil; auth.close() }
         authenticationWindows.removeAll(); webView.stopLoading(); return true
     }
@@ -183,6 +185,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         guard webHasFocus, !effectiveSafeMode, preferences.assistedPaste, policy.allowsAdapter(webView.url) else { return false }
         switch ClipboardReader.read(.general) {
         case .files(let selection): attachments.start(selection, requireFocus: true); showTransfersIfFailedRepresentations(selection); return true
+        case .mailRichText(let data, let changeCount):
+            let expectedGeneration = navigationGeneration
+            let expectedURL = webView.url
+            notice("Preparing attachments copied from Mail…")
+            mailAttachments.receive(data) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .failure(let error): self.notice(error.localizedDescription)
+                case .success(nil):
+                    guard self.navigationGeneration == expectedGeneration, self.webView.url == expectedURL,
+                          self.webHasFocus, NSPasteboard.general.changeCount == changeCount else {
+                        self.notice("The page, focus, or clipboard changed while the paste was being checked. Nothing was pasted.")
+                        return
+                    }
+                    if !NSApp.sendAction(Selector(("paste:")), to: nil, from: self) {
+                        self.notice("The copied content did not contain a Mail attachment and normal paste could not be completed.")
+                    }
+                case .success(let selection?):
+                    guard self.navigationGeneration == expectedGeneration, self.webView.url == expectedURL else {
+                        self.mailAttachments.release(selection.id)
+                        self.notice("The page changed while Mail was preparing the attachments. No files were sent.")
+                        return
+                    }
+                    if !self.attachments.start(selection, requireFocus: true) {
+                        self.mailAttachments.release(selection.id)
+                    }
+                }
+            }
+            return true
         case .unsupported(let message): notice(message); return true
         case .useSystemPaste: return false
         }
@@ -198,20 +229,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     @objc func newChat() { fixtureMode = false; webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!)) }
     @objc func reload() {
         guard let window else { return }
-        let alert = NSAlert(); alert.messageText = "Ladda om sidan?"; alert.informativeText = "Oskickad text och webb-bilagor kan gå förlorade. Inget skickas om automatiskt."
-        alert.addButton(withTitle: "Ladda om"); alert.addButton(withTitle: "Avbryt")
+        let alert = NSAlert(); alert.messageText = "Reload the page?"; alert.informativeText = "Unsent text and web attachments may be lost. Nothing is sent again automatically."
+        alert.addButton(withTitle: "Reload"); alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in if response == .alertFirstButtonReturn { self?.webView.reload() } }
     }
     @objc func chooseFiles() {
         guard policy.allowsAdapter(webView.url), let window, window.attachedSheet == nil,
-              let page = webView.url else { notice("Öppna ChatGPTs meddelandefält först."); return }
-        if effectiveSafeMode { notice("Använd webbens egen bifoga-knapp i felsäkert läge."); return }
+              let page = webView.url else { notice("Open ChatGPT's message field first."); return }
+        if effectiveSafeMode { notice("Use the website's own attachment button in Safe Mode."); return }
         let expected = navigationGeneration
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false; panel.canChooseFiles = true
-        panel.title = "Välj originalfiler"
+        panel.title = "Choose Original Files"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK else { return }
-            guard self.navigationGeneration == expected, self.webView.url == page else { self.notice("Sidan ändrades. Inga filer skickades."); return }
+            guard self.navigationGeneration == expected, self.webView.url == page else { self.notice("The page changed. No files were sent."); return }
             self.attachments.start(FileSelection(urls: panel.urls), requireFocus: false)
         }
     }
@@ -246,77 +277,77 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         guard !search.stringValue.isEmpty else { return }
         let configuration = WKFindConfiguration(); configuration.wraps = true
         webView.find(search.stringValue, configuration: configuration) { [weak self] result in
-            if !result.matchFound { self?.notice("Ingen matchning i den laddade sidan.") }
+            if !result.matchFound { self?.notice("No match was found on the loaded page.") }
         }
     }
     func changeZoom(_ delta: Double) { preferences.zoom += delta; webView.pageZoom = preferences.zoom }
     func resetZoom() { preferences.zoom = 1; webView.pageZoom = 1 }
     func openFixture() {
-        guard let url = policy.fixtureURL else { notice("Den lokala testfilen saknas."); return }
+        guard let url = policy.fixtureURL else { notice("The local test file is missing."); return }
         fixtureMode = true; webView.loadFileURL(url, allowingReadAccessTo: url)
     }
     func addBookmark() {
-        guard let url = webView.url, policy.isChat(url) else { notice("Endast ChatGPT-länkar sparas här."); return }
-        showLibrary(); libraryPanel?.add(LibraryEntry(kind: .bookmark, title: "Återkom till chatten", url: url.absoluteString))
+        guard let url = webView.url, policy.isChat(url) else { notice("Only ChatGPT links can be saved here."); return }
+        showLibrary(); libraryPanel?.add(LibraryEntry(kind: .bookmark, title: "Return to Chat", url: url.absoluteString))
     }
     func saveCurrentDraft() {
-        guard !effectiveSafeMode else { notice("Utkastsläsning är avstängd i felsäkert läge."); return }
+        guard !effectiveSafeMode else { notice("Draft reading is disabled in Safe Mode."); return }
         adapter.call("getDraft") { [weak self] result in
             guard let self, case .success(let info) = result, info["temporary"] as? Bool == false,
                   let text = info["text"] as? String, !text.isEmpty,
                   let href = info["href"] as? String, self.policy.isChat(URL(string: href)) else {
-                self?.notice("Inget sparbart utkast. Tillfälliga chattar sparas inte."); return
+                self?.notice("There is no draft to save. Temporary chats are not saved."); return
             }
-            self.showLibrary(); self.libraryPanel?.add(LibraryEntry(kind: .draft, title: "Sparat utkast", text: text, url: href))
+            self.showLibrary(); self.libraryPanel?.add(LibraryEntry(kind: .draft, title: "Saved Draft", text: text, url: href))
         }
     }
     func restoreSessionDraft() {
         guard let href = webView.url?.absoluteString, let draft = drafts.draft(for: href), let window else {
-            notice("Inget sessionsutkast för den här adressen. Tidigare konto eller tidigare appkörning återställs aldrig automatiskt."); return
+            notice("There is no session draft for this address. Drafts from another account or a previous app session are never restored automatically."); return
         }
-        let alert = NSAlert(); alert.messageText = "Återställ sessionsutkast?"
-        alert.informativeText = "Kontrollera att du är i rätt konto och chatt. Befintlig text skrivs inte över."
-        alert.addButton(withTitle: "Återställ i tomt fält"); alert.addButton(withTitle: "Avbryt")
+        let alert = NSAlert(); alert.messageText = "Restore the session draft?"
+        alert.informativeText = "Make sure you are in the correct account and chat. Existing text will not be overwritten."
+        alert.addButton(withTitle: "Restore into Empty Field"); alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self, self.webView.url?.absoluteString == href else { return }
             self.adapter.call("insertText", arguments: ["text": draft.text, "onlyIfEmpty": true]) { result in
                 if case .success(let info) = result, info["ok"] as? Bool == true { return }
-                self.notice("Utkastet infogades inte. Befintlig text lämnades orörd.")
+                self.notice("The draft was not inserted. Existing text was left unchanged.")
             }
         }
     }
     private func insertPrompt(_ text: String) {
-        guard !effectiveSafeMode else { notice("Promptinfogning är avstängd i felsäkert läge. Kopiera från biblioteket i stället."); return }
+        guard !effectiveSafeMode else { notice("Prompt insertion is disabled in Safe Mode. Copy from the library instead."); return }
         var values: [String: String] = [:]
         for key in PromptTemplate.variables(in: text) {
-            let alert = NSAlert(); alert.messageText = "Värde för {{\(key)}}"
+            let alert = NSAlert(); alert.messageText = "Value for {{\(key)}}"
             let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 26)); alert.accessoryView = field
-            alert.addButton(withTitle: "Fortsätt"); alert.addButton(withTitle: "Avbryt")
+            alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }; values[key] = field.stringValue
         }
         showAndFocus()
         adapter.call("insertText", arguments: ["text": PromptTemplate.render(text, values: values)]) { [weak self] result in
-            if case .success(let info) = result, info["ok"] as? Bool == true { self?.notice("Text infogad. Meddelandet är inte skickat.") }
-            else { self?.notice("Infogningen fungerade inte. Använd Kopiera i biblioteket och klistra in manuellt.") }
+            if case .success(let info) = result, info["ok"] as? Bool == true { self?.notice("Text inserted. The message has not been sent.") }
+            else { self?.notice("The text could not be inserted. Use Copy in the library and paste it manually.") }
         }
     }
 
     // MARK: WebKit delegates
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         updateAdapterContext()
-        notice(effectiveSafeMode ? "Felsäkert läge • grundwebb utan adapter" : (policy.isFixture(webView.url) ? "Lokalt filtest • inte ChatGPT-liveverifiering" : "Sidan laddad • ChatPretzel utvecklingsversion"))
+        notice(effectiveSafeMode ? "Safe Mode • basic website without adapter" : (policy.isFixture(webView.url) ? "Local file test • not live ChatGPT verification" : "Page loaded • ChatPretzel 0.2.0"))
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         navigationGeneration &+= 1; knownDocumentID = nil; attachments.navigationChanged()
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if (error as NSError).code != NSURLErrorCancelled { notice("Sidan kunde inte laddas (fel \((error as NSError).code)). Ingen automatisk omsändning. Prova Ladda om.") }
+        if (error as NSError).code != NSURLErrorCancelled { notice("The page could not be loaded (error \((error as NSError).code)). Nothing is resent automatically. Try Reload.") }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        notice("Laddningen avbröts (fel \((error as NSError).code)). Ladda om manuellt vid behov.")
+        notice("Loading stopped (error \((error as NSError).code)). Reload manually if needed.")
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        attachments.navigationChanged(); notice("WebKits webbprocess avslutades. Textutkast kan finnas kvar i sessionsminnet. Inget laddas om eller skickas automatiskt.")
+        attachments.navigationChanged(); notice("WebKit's web process ended. A text draft may remain in session memory. Nothing reloads or sends automatically.")
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -335,7 +366,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         case .external:
             decisionHandler(.cancel); if let url { NSWorkspace.shared.open(url) }
         case .deny:
-            decisionHandler(.cancel); notice("Navigering blockerad. Endast ChatGPT och uttryckligen tillåtna inloggningssidor öppnas i appen.")
+            decisionHandler(.cancel); notice("Navigation blocked. Only ChatGPT and explicitly allowed sign-in pages open inside the app.")
         }
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
@@ -361,7 +392,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         let url = navigationAction.request.url
         if policy.isAuthentication(url) || (url?.absoluteString == "about:blank" && policy.isAuthentication(webView.url)) {
-            guard authenticationWindows.count < 2 else { notice("För många inloggningsfönster."); return nil }
+            guard authenticationWindows.count < 2 else { notice("Too many sign-in windows are open."); return nil }
             let id = UUID(); let controller = AuthenticationWindow(configuration: configuration, policy: policy)
             controller.onNotice = { [weak self] in self?.notice($0) }
             controller.onClose = { [weak self] in self?.authenticationWindows.removeValue(forKey: id) }
@@ -383,13 +414,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         guard let window, window.attachedSheet == nil else { completionHandler(false); return }
         let alert = NSAlert(); alert.messageText = frame.securityOrigin.host; alert.informativeText = String(message.prefix(2000))
-        alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Avbryt")
+        alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
     }
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        notice("Röst/kamera är inte aktiverat i denna version. Använd webbläsaren för det flödet."); decisionHandler(.deny)
+        guard type == .microphone,
+              frame.isMainFrame,
+              policy.isChat(frame.request.url),
+              policy.isChat(webView.url),
+              origin.protocol.lowercased() == "https",
+              NavigationPolicy.chatHosts.contains(origin.host.lowercased()) else {
+            notice("Camera access and microphone requests outside ChatGPT are blocked.")
+            decisionHandler(.deny)
+            return
+        }
+        // Let WebKit and macOS display and remember the normal microphone permission prompt.
+        // ChatPretzel never starts recording on its own; this callback follows a website request.
+        decisionHandler(.prompt)
     }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard !effectiveSafeMode, message.webView === webView, message.frameInfo.isMainFrame,

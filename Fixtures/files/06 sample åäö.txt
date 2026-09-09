@@ -1,0 +1,4 @@
+Marker: CHATDESK-TXT-386
+Unicode characters: åäö ÅÄÖ
+A line with spaces and code:
+	if (a < b) { print("test"); }

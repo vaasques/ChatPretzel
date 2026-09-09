@@ -22,11 +22,11 @@ enum FileValidationError: Error {
     case unsupported, unavailable, directory, symbolicLink, cloudPlaceholder
     var message: String {
         switch self {
-        case .unsupported: return "Ingen vanlig lokal fil."
-        case .unavailable: return "Filen är inte tillgänglig eller saknar läsbehörighet."
-        case .directory: return "Mappar och app-paket bifogas inte."
-        case .symbolicLink: return "Symboliska länkar följs inte. Välj originalfilen."
-        case .cloudPlaceholder: return "Molnfilen är inte hämtad lokalt. Hämta den i Finder och försök igen."
+        case .unsupported: return "Not a regular local file."
+        case .unavailable: return "The file is unavailable or does not have read permission."
+        case .directory: return "Folders and app bundles cannot be attached."
+        case .symbolicLink: return "Symbolic links are not followed. Choose the original file."
+        case .cloudPlaceholder: return "The cloud file has not been downloaded locally. Download it in Finder and try again."
         }
     }
 }

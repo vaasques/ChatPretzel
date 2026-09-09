@@ -23,31 +23,31 @@ final class LibraryPanel: NSWindowController, NSTableViewDataSource, NSTableView
         self.model = model
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 850, height: 570),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        panel.title = "Lokalt bibliotek"; panel.isReleasedWhenClosed = false
+        panel.title = "Local Library"; panel.isReleasedWhenClosed = false
         super.init(window: panel); panel.delegate = self
-        search.placeholderString = "Sök titel, text och taggar"; search.delegate = self
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("entry")); column.title = "Poster"; column.width = 235
+        search.placeholderString = "Search titles, text, and tags"; search.delegate = self
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("entry")); column.title = "Entries"; column.width = 235
         table.addTableColumn(column); table.delegate = self; table.dataSource = self; table.rowHeight = 34
         let listScroll = NSScrollView(); listScroll.documentView = table; listScroll.hasVerticalScroller = true
-        let addRow = NSStackView(views: [button("Ny prompt", #selector(addPrompt)), button("Ny anteckning", #selector(addNote))]); addRow.spacing = 6
+        let addRow = NSStackView(views: [button("New Prompt", #selector(addPrompt)), button("New Note", #selector(addNote))]); addRow.spacing = 6
         let left = NSStackView(views: [search, listScroll, addRow]); left.orientation = .vertical; left.alignment = .leading; left.spacing = 10
         left.widthAnchor.constraint(equalToConstant: 260).isActive = true
         for view in [search, listScroll, addRow] { view.widthAnchor.constraint(equalTo: left.widthAnchor).isActive = true }
         listScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
-        titleField.placeholderString = "Titel"; titleField.delegate = self
-        tagsField.placeholderString = "Taggar, separerade med komma"; tagsField.delegate = self
-        kindPicker.addItems(withTitles: ["Prompt", "Bokmärke", "Anteckning", "Sparat utkast"])
+        titleField.placeholderString = "Title"; titleField.delegate = self
+        tagsField.placeholderString = "Tags, separated by commas"; tagsField.delegate = self
+        kindPicker.addItems(withTitles: ["Prompt", "Bookmark", "Note", "Saved Draft"])
         kindPicker.target = self; kindPicker.action = #selector(markDirty)
         body.isRichText = false; body.font = .systemFont(ofSize: 14); body.delegate = self
         body.isAutomaticQuoteSubstitutionEnabled = false; body.isAutomaticDashSubstitutionEnabled = false
         body.isVerticallyResizable = true; body.isHorizontallyResizable = false; body.autoresizingMask = [.width]
         body.textContainer?.widthTracksTextView = true
         let editorScroll = NSScrollView(); editorScroll.documentView = body; editorScroll.hasVerticalScroller = true; editorScroll.borderType = .bezelBorder
-        let commands = NSStackView(views: [button("Spara", #selector(save)), button("Kopiera", #selector(copyBody)),
-            button("Infoga i chatten", #selector(insert)), button("Öppna länk", #selector(openLink)), button("Radera", #selector(deleteEntry))])
+        let commands = NSStackView(views: [button("Save", #selector(save)), button("Copy", #selector(copyBody)),
+            button("Insert into Chat", #selector(insert)), button("Open Link", #selector(openLink)), button("Delete", #selector(deleteEntry))])
         commands.spacing = 8; commands.distribution = .fillProportionally
-        let transfer = NSStackView(views: [button("Exportera JSON…", #selector(exportData)), button("Importera JSON…", #selector(importData))]); transfer.spacing = 8
-        let privacy = NSTextField(wrappingLabelWithString: "Poster sparas som lokal JSON. Ingen molnsynk. {{variabel}} i prompter frågas efter vid infogning. Inget skickas automatiskt.")
+        let transfer = NSStackView(views: [button("Export JSON…", #selector(exportData)), button("Import JSON…", #selector(importData))]); transfer.spacing = 8
+        let privacy = NSTextField(wrappingLabelWithString: "Entries are stored as local JSON. There is no cloud sync. Prompt variables such as {{variable}} are requested when inserted. Nothing is sent automatically.")
         privacy.textColor = .secondaryLabelColor; privacy.font = .systemFont(ofSize: 11)
         let right = NSStackView(views: [kindPicker, titleField, tagsField, linkLabel, editorScroll, commands, transfer, privacy])
         right.orientation = .vertical; right.alignment = .leading; right.spacing = 10
@@ -80,7 +80,7 @@ final class LibraryPanel: NSWindowController, NSTableViewDataSource, NSTableView
     func numberOfRows(in tableView: NSTableView) -> Int { visible.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard visible.indices.contains(row) else { return nil }
-        let label = NSTextField(labelWithString: visible[row].title.isEmpty ? "Utan titel" : visible[row].title)
+        let label = NSTextField(labelWithString: visible[row].title.isEmpty ? "Untitled" : visible[row].title)
         label.lineBreakMode = .byTruncatingTail; return label
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { filling || allowLeave() }
@@ -104,15 +104,15 @@ final class LibraryPanel: NSWindowController, NSTableViewDataSource, NSTableView
         guard allowLeave() else { return }
         selectedID = entry.id; dirty = false; model.upsert(entry); refresh(); showWindow(nil); window?.makeKeyAndOrderFront(nil)
     }
-    @objc private func addPrompt() { add(LibraryEntry(kind: .prompt, title: "Ny prompt")) }
-    @objc private func addNote() { add(LibraryEntry(kind: .note, title: "Ny anteckning")) }
+    @objc private func addPrompt() { add(LibraryEntry(kind: .prompt, title: "New Prompt")) }
+    @objc private func addNote() { add(LibraryEntry(kind: .note, title: "New Note")) }
     @objc private func save() {
         guard var entry = selected else { return }
         entry.title = titleField.stringValue; entry.tags = tagsField.stringValue; entry.text = body.string
         entry.kind = pickedKind; entry.updatedAt = Date()
         var probe = model.document
         if let i = probe.entries.firstIndex(where: { $0.id == entry.id }) { probe.entries[i] = entry }
-        do { try probe.validate() } catch { model.onError?("Texten är för stor eller posten ogiltig. Den är inte sparad."); return }
+        do { try probe.validate() } catch { model.onError?("The text is too large or the entry is invalid. It was not saved."); return }
         guard model.writable else { return }
         dirty = false; model.upsert(entry)
     }
@@ -121,16 +121,16 @@ final class LibraryPanel: NSWindowController, NSTableViewDataSource, NSTableView
     @objc private func openLink() { if let value = selected?.url, let url = URL(string: value), NavigationPolicy().isChat(url) { onOpen?(url) } }
     @objc private func deleteEntry() {
         guard let entry = selected else { return }
-        let alert = NSAlert(); alert.messageText = "Radera den lokala posten?"; alert.informativeText = "Detta raderar inte chatten hos ChatGPT."
-        alert.addButton(withTitle: "Radera"); alert.addButton(withTitle: "Avbryt")
+        let alert = NSAlert(); alert.messageText = "Delete the local entry?"; alert.informativeText = "This does not delete the chat from ChatGPT."
+        alert.addButton(withTitle: "Delete"); alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn { dirty = false; selectedID = nil; model.delete(entry.id); refresh() }
     }
     @objc private func exportData() {
         guard let window else { return }
-        let panel = NSSavePanel(); panel.nameFieldStringValue = "ChatPretzel-bibliotek.json"
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "ChatPretzel-library.json"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
-            self.model.export(to: url) { [weak self] ok in if !ok { self?.model.onError?("Export misslyckades.") } }
+            self.model.export(to: url) { [weak self] ok in if !ok { self?.model.onError?("Export failed.") } }
         }
     }
     @objc private func importData() {
@@ -142,8 +142,8 @@ final class LibraryPanel: NSWindowController, NSTableViewDataSource, NSTableView
     }
     func allowLeave() -> Bool {
         guard dirty else { return true }
-        let alert = NSAlert(); alert.messageText = "Spara ändringarna i posten?"
-        alert.addButton(withTitle: "Spara"); alert.addButton(withTitle: "Kasta ändringar"); alert.addButton(withTitle: "Stanna")
+        let alert = NSAlert(); alert.messageText = "Save changes to this entry?"
+        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Discard Changes"); alert.addButton(withTitle: "Stay")
         switch alert.runModal() {
         case .alertFirstButtonReturn: save(); return !dirty
         case .alertSecondButtonReturn: dirty = false; return true

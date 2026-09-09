@@ -4,14 +4,14 @@ public enum AttachmentState: String, Codable, CaseIterable, Sendable {
     case identified, checking, waitingForWebKit, handedToWebKit, userConfirmed, failed, cancelled, unknown
     public var label: String {
         switch self {
-        case .identified: return "Identifierad lokalt"
-        case .checking: return "Kontrollerar fil"
-        case .waitingForWebKit: return "Väntar på WebKit"
-        case .handedToWebKit: return "Överlämnad – uppladdning ej verifierad"
-        case .userConfirmed: return "Bekräftad av användaren"
-        case .failed: return "Fel"
-        case .cancelled: return "Avbruten före överlämning"
-        case .unknown: return "Slutstatus okänd"
+        case .identified: return "Identified locally"
+        case .checking: return "Checking file"
+        case .waitingForWebKit: return "Waiting for WebKit"
+        case .handedToWebKit: return "Handed over – upload not verified"
+        case .userConfirmed: return "Confirmed by user"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled before handoff"
+        case .unknown: return "Final status unknown"
         }
     }
     public func allows(_ next: AttachmentState) -> Bool {

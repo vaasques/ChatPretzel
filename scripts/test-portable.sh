@@ -8,5 +8,5 @@ swift test --filter 'NavigationTests|PermitTests|FileSelectionTests|LocalStoreTe
 if command -v node >/dev/null; then
   node --test Tests/Web/adapter.test.mjs 2>&1 | tee test-results/adapter-tests.txt
 else
-  echo 'EJ KÖRT: Node saknas. Det behövs bara för utvecklingstest av JavaScript, inte för appen.' | tee test-results/adapter-tests.txt
+  echo 'NOT RUN: Node is unavailable. It is needed only for JavaScript development tests, not for the app.' | tee test-results/adapter-tests.txt
 fi

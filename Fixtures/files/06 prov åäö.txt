@@ -1,4 +1,0 @@
-Marker: CHATDESK-TXT-386
-Svenska tecken: åäö ÅÄÖ
-En rad med mellanslag och kod:
-	if (a < b) { print("test"); }

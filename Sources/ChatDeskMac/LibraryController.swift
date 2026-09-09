@@ -32,18 +32,18 @@ final class LibraryController {
                 self.ready = true
                 switch result {
                 case .success(let document): self.document = document; self.writable = true
-                case .failure: self.writable = false; self.onError?("Lokala biblioteket kunde inte läsas. Original och backup lämnas orörda. Skrivning är spärrad; se felsökningsguiden.")
+                case .failure: self.writable = false; self.onError?("The local library could not be read. The original and backup were left unchanged. Writing is disabled; see the troubleshooting guide.")
                 }
                 self.onChange?()
             }
         }
     }
     func upsert(_ entry: LibraryEntry) {
-        guard ready, writable else { onError?("Biblioteket är ännu inte skrivklart."); return }
+        guard ready, writable else { onError?("The library is not ready for writing yet."); return }
         var next = document
         if let index = next.entries.firstIndex(where: { $0.id == entry.id }) { next.entries[index] = entry }
         else { next.entries.append(entry) }
-        do { try next.validate() } catch { onError?("Posten överskrider bibliotekets storleksgräns eller har en ogiltig länk."); return }
+        do { try next.validate() } catch { onError?("The entry exceeds the library size limit or contains an invalid link."); return }
         document = next; persist(); onChange?()
     }
     func delete(_ id: UUID) {
@@ -61,7 +61,7 @@ final class LibraryController {
                 guard let self else { return }
                 if self.revision == expected { self.savePending = false }
                 if case .failure = result {
-                    self.onError?("Kunde inte spara biblioteket på disk. Ändringarna finns kvar i minnet. Exportera innan du avslutar.")
+                    self.onError?("The library could not be saved to disk. Changes remain in memory. Export before quitting.")
                 }
                 self.onChange?()
             }
@@ -76,19 +76,19 @@ final class LibraryController {
         }
     }
     func importFile(_ url: URL) {
-        guard writable else { onError?("Import är spärrad när det befintliga biblioteket inte kan läsas."); return }
+        guard writable else { onError?("Import is disabled while the existing library cannot be read."); return }
         let lease = FileAccessLease(url)
         queue.async {
             let result = Result { try LibraryStore.decode(LibraryStore.readBounded(lease.url)) }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 switch result {
-                case .failure: self.onError?("Ogiltig eller för stor biblioteksexport. Inget importerades.")
+                case .failure: self.onError?("The library export is invalid or too large. Nothing was imported.")
                 case .success(let imported):
                     var next = self.document
                     let existing = Set(next.entries.map(\.id))
                     next.entries += imported.entries.filter { !existing.contains($0.id) }
-                    do { try next.validate() } catch { self.onError?("Importen skulle överskrida gränsen på 500 poster."); return }
+                    do { try next.validate() } catch { self.onError?("The import would exceed the 500-entry limit."); return }
                     self.document = next; self.persist(); self.onChange?()
                 }
             }

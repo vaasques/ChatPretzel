@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="sv"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'">
-<title>ChatPretzel • lokal filmottagare</title>
+<title>ChatPretzel • Local File Receiver</title>
 <style>
 :root{color-scheme:light dark;font:15px -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
 body{max-width:960px;margin:30px auto;padding:0 24px;line-height:1.5}
@@ -12,49 +12,49 @@ input,button{font:inherit;margin:8px 12px 8px 0;padding:8px}table{border-collaps
 th,td{border-bottom:1px solid #8886;text-align:left;padding:9px;vertical-align:top}
 code{font-size:12px;word-break:break-all}.ok{font-weight:650}.banner{padding:14px;border:1px solid #8886;border-radius:8px}
 </style></head><body>
-<h1>Lokal filmottagare</h1>
-<p class="muted">Detta är inte ChatGPT. Inga filer eller testresultat skickas till nätverket.</p>
-<p class="banner">Markera alla sex filer i <code>Fixtures/files</code> i Finder. Tryck Cmd+C, fokusera fältet nedan och tryck Cmd+V en gång. Jämför antalet och SHA-256 mot de medföljande originalen.</p>
+<h1>Local File Receiver</h1>
+<p class="muted">This is not ChatGPT. No files or test results are sent over the network.</p>
+<p class="banner">Select all six files in <code>Fixtures/files</code> in Finder. Press Command+C, focus the field below, and press Command+V once. Compare the count and SHA-256 values with the included originals.</p>
 <form id="fixture-form">
-<label for="prompt-textarea">Testkompositor – befintlig text ska finnas kvar</label>
-<textarea id="prompt-textarea" data-chatdesk-fixture-composer placeholder="Skriv exempelvis BEHÅLL DEN HÄR TEXTEN innan du klistrar in filerna."></textarea>
-<div><input type="file" id="fixture-files" multiple aria-label="Välj testfiler"><button type="button" id="reset">Rensa mottagna filer</button><button type="button" id="report">Spara lokal testrapport</button></div>
+<label for="prompt-textarea">Test composer – existing text must remain</label>
+<textarea id="prompt-textarea" data-chatdesk-fixture-composer placeholder="For example, type KEEP THIS TEXT before pasting the files."></textarea>
+<div><input type="file" id="fixture-files" multiple aria-label="Choose test files"><button type="button" id="reset">Clear Received Files</button><button type="button" id="report">Save Local Test Report</button></div>
 </form>
-<p id="summary" role="status">0 filer mottagna.</p>
-<table><thead><tr><th>Fil</th><th>Bytes</th><th>Lokal kontroll</th></tr></thead><tbody id="results"></tbody></table>
-<p class="muted">Hashkontrollen gäller enbart filer som webbvyn faktiskt kan läsa. Den bevisar inte Finder-behörigheter i en annan app, ChatGPTs serveruppladdning eller att blandad Cmd+V fungerar live.</p>
+<p id="summary" role="status">0 files received.</p>
+<table><thead><tr><th>File</th><th>Bytes</th><th>Local Check</th></tr></thead><tbody id="results"></tbody></table>
+<p class="muted">The hash check applies only to files the web view can actually read. It does not prove Finder permissions in another app, a server upload to ChatGPT, or that mixed Command+V works in the live service.</p>
 <script>
 'use strict';
 const EXPECTED = [
   {
-    "name": "01 prov åäö.pdf",
+    "name": "01 sample åäö.pdf",
     "size": 1630,
     "sha256": "ee6ae8af12e9547c6f45002d13b6e46024ad2bd28b17871d0cc98fa8e2faa65c"
   },
   {
-    "name": "02 prov åäö.docx",
-    "size": 36771,
-    "sha256": "b1cce219fba5bf28100a3e6f30269eacc5a297fa8866feed70d9d3e1dac367bc"
+    "name": "02 sample åäö.docx",
+    "size": 36770,
+    "sha256": "e79a62954359ebee88be02f5535403a9fabee199f7c43038d7630d3d95d88fca"
   },
   {
-    "name": "03 prov åäö.xlsx",
-    "size": 3602,
-    "sha256": "a5810e13859a47cd6eb95b519ea7dca93389e15b10f4eea9f627ca17e8716bef"
+    "name": "03 sample åäö.xlsx",
+    "size": 3612,
+    "sha256": "5f5c36e9f8f0c3826014afad23a216651a52148412a0f9eb078f98e78a6d1d9a"
   },
   {
-    "name": "04 prov åäö.png",
+    "name": "04 sample åäö.png",
     "size": 10348,
     "sha256": "f49c0bbb415e716020d595b3e3704a6b4a83e769a6d323c2f7b903fae8cc76c4"
   },
   {
-    "name": "05 prov åäö.jpg",
+    "name": "05 sample åäö.jpg",
     "size": 13234,
     "sha256": "004fe7f713a7262422622b0f64f54637e341f828b21e893ab944ad5104338307"
   },
   {
-    "name": "06 prov åäö.txt",
-    "size": 117,
-    "sha256": "27efa2b1d4685b7e0a0a7a4a982fe6aa3622c640c2ac76a2fd3f0cc3e13b39b0"
+    "name": "06 sample åäö.txt",
+    "size": 119,
+    "sha256": "eb2b462d7d4b3e89a0bf7864b72c227ab95aafebacdbebe6e8553149904856e4"
   }
 ]
 ;
@@ -65,13 +65,13 @@ function render() {
   rows.replaceChildren();
   for (const file of window.fixtureReport.files) {
     const row = document.createElement('tr');
-    for (const text of [file.name, String(file.size), (file.matchesExpected===true?'PASS – originalbytes':file.matchesExpected===false?'FAIL – bytes avviker':'Ej jämförd')+' / '+(file.sha256||file.error||'')]) {
+    for (const text of [file.name, String(file.size), (file.matchesExpected===true?'PASS – original bytes':file.matchesExpected===false?'FAIL – bytes differ':'Not compared')+' / '+(file.sha256||file.error||'')]) {
       const cell=document.createElement('td'); cell.textContent=text; row.append(cell);
     }
     rows.append(row);
   }
   const count=window.fixtureReport.files.length;
-  summary.textContent=`${count} filer mottagna. ${window.fixtureReport.pending} kontroller återstår. Formuläret har skickats ${window.fixtureReport.submitted} gånger.`;
+  summary.textContent=`${count} files received. ${window.fixtureReport.pending} checks remaining. The form has been submitted ${window.fixtureReport.submitted} times.`;
 }
 async function receive(files, source) {
   const captured=Array.from(files), currentEpoch=epoch;
@@ -81,8 +81,8 @@ async function receive(files, source) {
   for (const file of captured) {
     let digest=null,error=null;
     try {
-      if(file.size>8*1024*1024) throw new Error('Fixturegräns 8 MiB per fil; appens URL-överföring har inte denna gräns');
-      if(!crypto.subtle) throw new Error('Web Crypto saknas i denna testmiljö');
+      if(file.size>8*1024*1024) throw new Error('Fixture limit: 8 MiB per file; the app\'s URL handoff does not have this limit');
+      if(!crypto.subtle) throw new Error('Web Crypto is unavailable in this test environment');
       digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');
     } catch(e){error=String(e.message||e);}
     if(currentEpoch!==epoch) return;

@@ -52,7 +52,7 @@ def main():
             manifest = json.loads((ROOT / 'Fixtures/manifest.json').read_text())
             files = [ROOT / 'Fixtures/files' / item['name'] for item in manifest]
             descriptors = [{'extension': path.suffix[1:], 'mime': MIMES[path.suffix[1:]]} for path in files]
-            sentinel = 'BEHÅLL TEXT OCH ÅÄÖ\nIngen automatisk sändning.'
+            sentinel = 'KEEP THIS TEXT AND UNICODE ÅÄÖ\nNo automatic submission.'
             page.locator('#prompt-textarea').fill(sentinel)
             context = page.evaluate('ChatDeskAdapter.context()')
             check('composer and document identity', context['hasComposer'] and context['focused'] and bool(context['documentID']))

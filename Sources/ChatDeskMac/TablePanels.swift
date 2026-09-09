@@ -9,15 +9,15 @@ final class TransferPanel: NSWindowController, NSTableViewDataSource, NSTableVie
         self.coordinator = coordinator
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 850, height: 390),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        panel.title = "Bilagor • lokal status"; panel.isReleasedWhenClosed = false
+        panel.title = "Attachments • Local Status"; panel.isReleasedWhenClosed = false
         super.init(window: panel)
-        for (id, title, width) in [("name", "Fil", 230.0), ("state", "Status", 290.0), ("detail", "Information", 290.0)] {
+        for (id, title, width) in [("name", "File", 230.0), ("state", "Status", 290.0), ("detail", "Information", 290.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id)); column.title = title; column.width = width; table.addTableColumn(column)
         }
         table.dataSource = self; table.delegate = self; table.allowsMultipleSelection = true; table.rowHeight = 28
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
-        let info = NSTextField(wrappingLabelWithString: "Överlämnad till WebKit betyder inte färdiguppladdad. Markera bara filer du själv har kontrollerat i ChatGPT som klara. Avbryt stoppar endast filer som ännu inte överlämnats.")
-        let buttons = NSStackView(views: [button("Avbryt väntande", #selector(cancel)), button("Bekräfta markerade", #selector(confirm)), button("Rensa avslutad historik", #selector(clear))])
+        let info = NSTextField(wrappingLabelWithString: "Handed to WebKit does not mean fully uploaded. Confirm only files you have checked in ChatGPT yourself. Cancel stops only files that have not yet been handed over.")
+        let buttons = NSStackView(views: [button("Cancel Pending", #selector(cancel)), button("Confirm Selected", #selector(confirm)), button("Clear Completed History", #selector(clear))])
         buttons.spacing = 10
         installPanelContent(panel, views: [info, scroll, buttons], flexible: scroll)
     }
@@ -41,9 +41,9 @@ final class TransferPanel: NSWindowController, NSTableViewDataSource, NSTableVie
     @objc private func confirm() {
         let ids = Set(table.selectedRowIndexes.compactMap { coordinator.records.indices.contains($0) ? coordinator.records[$0].id : nil })
         guard !ids.isEmpty else { return }
-        let alert = NSAlert(); alert.messageText = "Har du kontrollerat de markerade bilagorna?"
-        alert.informativeText = "Detta är din manuella bekräftelse, inte ett automatiskt test av tjänsten."
-        alert.addButton(withTitle: "Ja, de är färdigbifogade"); alert.addButton(withTitle: "Avbryt")
+        let alert = NSAlert(); alert.messageText = "Have you checked the selected attachments?"
+        alert.informativeText = "This is your manual confirmation, not an automated test of the service."
+        alert.addButton(withTitle: "Yes, They Are Attached"); alert.addButton(withTitle: "Cancel")
         guard let window else { return }
         alert.beginSheetModal(for: window) { [weak self] result in
             if result == .alertFirstButtonReturn { self?.coordinator.confirm(ids); self?.refresh() }
@@ -59,15 +59,15 @@ final class DownloadsPanel: NSWindowController, NSTableViewDataSource, NSTableVi
         self.coordinator = coordinator
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 720, height: 340),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        panel.title = "Nedladdningar"; panel.isReleasedWhenClosed = false
+        panel.title = "Downloads"; panel.isReleasedWhenClosed = false
         super.init(window: panel)
-        for (id, title, width) in [("name", "Fil", 300.0), ("state", "Status", 360.0)] {
+        for (id, title, width) in [("name", "File", 300.0), ("state", "Status", 360.0)] {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id)); col.title = title; col.width = width; table.addTableColumn(col)
         }
         table.dataSource = self; table.delegate = self; table.allowsMultipleSelection = true; table.rowHeight = 28
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
-        let buttons = NSStackView(views: [NSButton(title: "Visa i Finder", target: self, action: #selector(reveal)),
-                                         NSButton(title: "Avbryt markerade", target: self, action: #selector(cancel))]); buttons.spacing = 10
+        let buttons = NSStackView(views: [NSButton(title: "Show in Finder", target: self, action: #selector(reveal)),
+                                         NSButton(title: "Cancel Selected", target: self, action: #selector(cancel))]); buttons.spacing = 10
         installPanelContent(panel, views: [scroll, buttons], flexible: scroll)
     }
     required init?(coder: NSCoder) { nil }

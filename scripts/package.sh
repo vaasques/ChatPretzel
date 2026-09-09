@@ -14,7 +14,7 @@ CHATPRETZEL_APP_PATH="$STAGE/ChatPretzel.app" bash scripts/verify-app.sh
 /usr/bin/codesign --verify --strict --verbose=2 "$STAGE/ChatPretzel.app"
 ln -s /Applications "$STAGE/Applications"
 cp START_HERE.md "$STAGE/START_HERE.md"
-OUT="$ROOT/dist/ChatPretzel-0.1.3-$(uname -m)-$(date +%Y%m%d-%H%M%S).dmg"
+OUT="$ROOT/dist/ChatPretzel-0.2.0-$(uname -m)-$(date +%Y%m%d-%H%M%S).dmg"
 /usr/bin/hdiutil create -volname ChatPretzel -srcfolder "$STAGE" -ov -format UDZO "$OUT"
 /usr/bin/shasum -a 256 "$OUT" > "$OUT.sha256"
 printf 'DMG created: %s\n' "$OUT"

@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey.unregister()
         guard preferences.globalHotKey else { return }
         let result = hotKey.register(useCommand: preferences.hotKeyUsesCommand)
-        if result != noErr { main.notice("Global genväg kunde inte registreras (\(result)). Den kan vara upptagen. Välj en annan i Inställningar; inget annat program har ändrats.") }
+        if result != noErr { main.notice("The global shortcut could not be registered (\(result)). It may already be in use. Choose another shortcut in Settings; no other app was changed.") }
     }
     private func makeMenu() {
         let bar = NSMenu()
@@ -49,61 +49,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.target = target; item.keyEquivalentModifierMask = modifiers; menu.addItem(item)
         }
         let app = submenu("ChatPretzel")
-        add(app, "Om ChatPretzel", #selector(about), target: self)
-        add(app, "Inställningar…", #selector(settings), ",", target: self)
+        add(app, "About ChatPretzel", #selector(about), target: self)
+        add(app, "Settings…", #selector(settings), ",", target: self)
         app.addItem(.separator())
-        add(app, "Göm ChatPretzel", #selector(NSApplication.hide(_:)), "h", target: NSApp)
-        add(app, "Göm andra", #selector(NSApplication.hideOtherApplications(_:)), "h", target: NSApp, modifiers: [.command, .option])
-        add(app, "Visa alla", #selector(NSApplication.unhideAllApplications(_:)), target: NSApp)
-        app.addItem(.separator()); add(app, "Avsluta ChatPretzel", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
-        let file = submenu("Arkiv")
-        add(file, "Ny chatt", #selector(newChat), "n", target: self)
-        add(file, "Bifoga originalfiler…", #selector(chooseFiles), "o", target: self)
-        add(file, "Spara textutkast lokalt", #selector(saveDraft), "s", target: self, modifiers: [.command, .shift])
-        add(file, "Återställ sessionsutkast…", #selector(restoreDraft), target: self)
-        add(file, "Spara chatt som bokmärke", #selector(bookmark), "d", target: self)
-        file.addItem(.separator()); add(file, "Stäng fönster", #selector(NSWindow.performClose(_:)), "w")
-        let edit = submenu("Redigera")
-        add(edit, "Ångra", Selector(("undo:")), "z")
-        add(edit, "Gör om", Selector(("redo:")), "z", modifiers: [.command, .shift]); edit.addItem(.separator())
-        add(edit, "Klipp ut", Selector(("cut:")), "x"); add(edit, "Kopiera", Selector(("copy:")), "c")
-        add(edit, "Klistra in", #selector(paste), "v", target: self)
-        add(edit, "Markera allt", Selector(("selectAll:")), "a")
-        let view = submenu("Visa")
-        add(view, "Sök i sidan", #selector(find), "f", target: self)
-        add(view, "Ladda om…", #selector(reload), "r", target: self)
-        add(view, "Bakåt", #selector(back), "[", target: self); add(view, "Framåt", #selector(forward), "]", target: self)
+        add(app, "Hide ChatPretzel", #selector(NSApplication.hide(_:)), "h", target: NSApp)
+        add(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", target: NSApp, modifiers: [.command, .option])
+        add(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)), target: NSApp)
+        app.addItem(.separator()); add(app, "Quit ChatPretzel", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
+        let file = submenu("File")
+        add(file, "New Chat", #selector(newChat), "n", target: self)
+        add(file, "Attach Original Files…", #selector(chooseFiles), "o", target: self)
+        add(file, "Save Text Draft Locally", #selector(saveDraft), "s", target: self, modifiers: [.command, .shift])
+        add(file, "Restore Session Draft…", #selector(restoreDraft), target: self)
+        add(file, "Bookmark Chat", #selector(bookmark), "d", target: self)
+        file.addItem(.separator()); add(file, "Close Window", #selector(NSWindow.performClose(_:)), "w")
+        let edit = submenu("Edit")
+        add(edit, "Undo", Selector(("undo:")), "z")
+        add(edit, "Redo", Selector(("redo:")), "z", modifiers: [.command, .shift]); edit.addItem(.separator())
+        add(edit, "Cut", Selector(("cut:")), "x"); add(edit, "Copy", Selector(("copy:")), "c")
+        add(edit, "Paste", #selector(paste), "v", target: self)
+        add(edit, "Select All", Selector(("selectAll:")), "a")
+        let view = submenu("View")
+        add(view, "Find on Page", #selector(find), "f", target: self)
+        add(view, "Reload…", #selector(reload), "r", target: self)
+        add(view, "Back", #selector(back), "[", target: self); add(view, "Forward", #selector(forward), "]", target: self)
         view.addItem(.separator())
-        add(view, "Zooma in", #selector(zoomIn), "+", target: self)
-        add(view, "Zooma ut", #selector(zoomOut), "-", target: self)
-        add(view, "Normal zoom", #selector(resetZoom), "0", target: self)
-        view.addItem(.separator()); add(view, "Lokalt bibliotek", #selector(library), "l", target: self, modifiers: [.command, .shift])
-        add(view, "Bilagornas status", #selector(transfers), target: self)
-        add(view, "Nedladdningar", #selector(downloads), target: self)
-        let window = submenu("Fönster")
-        add(window, "Minimera", #selector(NSWindow.performMiniaturize(_:)), "m")
-        add(window, "Visa ChatPretzel", #selector(showMain), target: self)
+        add(view, "Zoom In", #selector(zoomIn), "+", target: self)
+        add(view, "Zoom Out", #selector(zoomOut), "-", target: self)
+        add(view, "Actual Size", #selector(resetZoom), "0", target: self)
+        view.addItem(.separator()); add(view, "Local Library", #selector(library), "l", target: self, modifiers: [.command, .shift])
+        add(view, "Attachment Status", #selector(transfers), target: self)
+        add(view, "Downloads", #selector(downloads), target: self)
+        let window = submenu("Window")
+        add(window, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
+        add(window, "Show ChatPretzel", #selector(showMain), target: self)
         NSApp.windowsMenu = window
-        let help = submenu("Hjälp")
-        add(help, "Öppna lokalt filtest…", #selector(fixture), target: self)
-        add(help, "Exportera teknisk diagnostik…", #selector(diagnostics), target: self)
-        add(help, "Viktig teststatus", #selector(testStatus), target: self)
+        let help = submenu("Help")
+        add(help, "Open Local File Test…", #selector(fixture), target: self)
+        add(help, "Export Technical Diagnostics…", #selector(diagnostics), target: self)
+        add(help, "Important Test Status", #selector(testStatus), target: self)
         NSApp.helpMenu = help; NSApp.mainMenu = bar
     }
     @objc private func about() {
-        let alert = NSAlert(); alert.messageText = "ChatPretzel 0.1.3 • lokal utvecklingsversion"
-        alert.informativeText = "Swift + AppKit + systemets WebKit. Ingen Electron eller separat AI-betalning i appen.\n\nInget officiellt OpenAI-program. Native bygge, inloggning, blandad paste och verklig resursförbrukning måste verifieras på Mac."
+        let alert = NSAlert(); alert.messageText = "ChatPretzel 0.2.0"
+        alert.informativeText = "Built with Swift, AppKit, and the WebKit engine included with macOS. No Electron and no separate AI subscription inside the app. Microphone access is requested only when you start voice input in ChatGPT; camera access remains blocked.\n\nChatPretzel is an independent, unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI. Sign in with your ChatGPT password rather than a passkey."
         alert.runModal()
     }
     @objc private func testStatus() {
-        let alert = NSAlert(); alert.messageText = "Det viktiga testet"
-        alert.informativeText = "Markera PDF, DOCX, XLSX, PNG, JPG och TXT i Finder. Cmd+C, fokusera ChatGPTs skrivfält, Cmd+V en gång. Alla sex ska bli riktiga bilagor utan att prompten skickas.\n\nDen lokala testmottagaren kan kontrollera filbytes med SHA-256. Det bevisar inte ChatGPTs uppladdning. Inloggning och tjänstens verkliga beteende testas separat."
+        let alert = NSAlert(); alert.messageText = "Important attachment test"
+        alert.informativeText = "Select PDF, DOCX, XLSX, PNG, JPG, and TXT files in Finder. Press Command+C, focus ChatGPT's message field, and press Command+V once. You can also copy attachments in Mail and paste them into the message field. The files should become real attachments without sending the prompt.\n\nThe local test receiver can verify file bytes with SHA-256. It does not prove that ChatGPT's server accepted an upload. Login and live service behavior are tested separately."
         alert.runModal()
     }
     @objc private func fixture() {
-        let alert = NSAlert(); alert.messageText = "Byt till lokal testmottagare?"
-        alert.informativeText = "Den nuvarande webbsidan lämnas och oskickade bilagor kan försvinna. Testmottagaren gör inga nätverksanrop."
-        alert.addButton(withTitle: "Öppna lokalt filtest"); alert.addButton(withTitle: "Avbryt")
+        let alert = NSAlert(); alert.messageText = "Switch to the local test receiver?"
+        alert.informativeText = "This leaves the current web page, and unsent attachments may disappear. The test receiver makes no network requests."
+        alert.addButton(withTitle: "Open Local File Test"); alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn { main.openFixture() }
     }
     @objc private func diagnostics() { main.exportDiagnostics() }

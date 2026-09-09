@@ -1,4 +1,4 @@
-/* ChatDesk native adapter v0.1.3. Runs in a private WKContentWorld, main frame only.
+/* ChatDesk native adapter v0.2.0. Runs in a private WKContentWorld, main frame only.
    No fetch/XHR hooks, no private endpoints, no unsolicited clipboard access, no file-byte copies.
    Only a native user action can create/consume a native upload permit. */
 (() => {
@@ -47,14 +47,14 @@
   }
   function prepareFiles(args) {
     const c = composer();
-    if (!c) return {ok: false, error: 'Hittar inte ChatGPTs meddelandefält.'};
-    if (args.requireFocus && !focusedComposer(c)) return {ok: false, error: 'Fokusera meddelandefältet innan filinklistrning.'};
+    if (!c) return {ok: false, error: 'ChatGPT\'s message field could not be found.'};
+    if (args.requireFocus && !focusedComposer(c)) return {ok: false, error: 'Focus the message field before pasting attachments.'};
     if (typeof args.token !== 'string' || args.token.length > 80 || !Array.isArray(args.files)
-        || args.files.length === 0 || args.files.length > 100) return {ok: false, error: 'Ogiltig lokal filoperation.'};
+        || args.files.length === 0 || args.files.length > 100) return {ok: false, error: 'Invalid local file operation.'};
     const candidates = fileCandidates(c, args.files);
     if (candidates.length !== 1) return {ok: false, error: candidates.length === 0
-      ? 'Ingen befintlig filkontroll accepterar hela urvalet. Inga filer skickades.'
-      : 'Flera möjliga filkontroller. Säker automatisk koppling kan inte avgöras.'};
+      ? 'No existing file control accepts the entire selection. No files were sent.'
+      : 'Multiple file controls are possible. A safe automatic match cannot be determined.'};
     pending = {token: args.token, input: candidates[0], href: href(), documentID,
       preparedAt: Date.now(), triggered: false};
     lastClickedFileInput = null;
@@ -69,7 +69,7 @@
   function triggerFiles(args) {
     if (!pending || pending.token !== args.token || pending.href !== href()
         || !pending.input.isConnected || Date.now() - pending.preparedAt > 5000) {
-      pending = null; return {ok: false, error: 'Filsidan ändrades före överföring.'};
+      pending = null; return {ok: false, error: 'The file page changed before handoff.'};
     }
     pending.triggered = true;
     // Ask the EXISTING web control to open its native picker. The WKUIDelegate may then
@@ -81,19 +81,19 @@
   function cancelFiles() { pending = null; lastClickedFileInput = null; return {ok: true}; }
   function getDraft() {
     const text = draftText(composer());
-    if (text.length > 65536) return {...context(), ok: false, error: 'Utkastet är för långt för lokal lagring. Texten har inte kapats.'};
+    if (text.length > 65536) return {...context(), ok: false, error: 'The draft is too long for local storage. The text was not truncated.'};
     return {...context(), text};
   }
   function insertText(args) {
     const c = composer();
-    if (!c || typeof args.text !== 'string' || args.text.length > 65536) return {ok: false, error: 'Kan inte infoga text.'};
-    if (args.onlyIfEmpty && draftText(c).length) return {ok: false, error: 'Fältet innehåller redan text. Inget skrevs över.'};
+    if (!c || typeof args.text !== 'string' || args.text.length > 65536) return {ok: false, error: 'The text could not be inserted.'};
+    if (args.onlyIfEmpty && draftText(c).length) return {ok: false, error: 'The field already contains text. Nothing was overwritten.'};
     c.focus();
     // execCommand is used solely for user-requested editing to preserve the editor's undo stack.
     // No DOM replacement fallback: that can desynchronise React/ProseMirror.
     const before = draftText(c);
     const inserted = document.execCommand('insertText', false, args.text);
-    return {ok: inserted && draftText(c) !== before, error: inserted ? '' : 'Webbredigeraren accepterade inte infogning. Kopiera texten manuellt.'};
+    return {ok: inserted && draftText(c) !== before, error: inserted ? '' : 'The web editor did not accept the insertion. Copy the text manually.'};
   }
   function selectedText() {
     const active = document.activeElement;
@@ -104,8 +104,8 @@
     } else {
       text = String(globalThis.getSelection?.()?.toString?.() || '');
     }
-    if (!text) return {ok: false, error: 'Ingen markerad text.'};
-    if (text.length > 1_000_000) return {ok: false, error: 'Markeringen är för stor för säker kopiering.'};
+    if (!text) return {ok: false, error: 'No text is selected.'};
+    if (text.length > 1_000_000) return {ok: false, error: 'The selection is too large to copy safely.'};
     return {ok: true, text};
   }
   function onCopy(event) {

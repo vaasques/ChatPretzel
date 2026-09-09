@@ -36,6 +36,7 @@ final class NativeWebView: WKWebView {
         guard mayHandleDrop?() == true else { return super.performDragOperation(sender) }
         switch ClipboardReader.read(sender.draggingPasteboard) {
         case .files(let selection): return onFileDrop?(selection) ?? false
+        case .mailRichText: return super.performDragOperation(sender)
         case .unsupported(let message): onUnsupportedDrop?(message); return false
         case .useSystemPaste: return super.performDragOperation(sender)
         }
