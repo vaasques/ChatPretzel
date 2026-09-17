@@ -7,12 +7,17 @@ final class ChatWindow: NSWindow {
     var mapControlCV: (() -> Bool)?
     var interactionLocked: (() -> Bool)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let key = event.charactersIgnoringModifiers?.lowercased()
         if interactionLocked?() == true {
+            // The conversation stays locked, not the user's desktop. Hiding or
+            // minimising must not stop a user-authorised background upload.
+            if flags == [.command], let key, ["h", "m", "q"].contains(key) {
+                return super.performKeyEquivalent(with: event)
+            }
             NSSound.beep()
             return true
         }
-        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        let key = event.charactersIgnoringModifiers?.lowercased()
         if flags == [.command], key == "v", interceptFilePaste?() == true { return true }
         if flags == [.control], mapControlCV?() == true {
             if key == "v" {

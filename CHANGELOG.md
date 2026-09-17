@@ -1,5 +1,41 @@
 # Release notes
 
+## 0.3.3 — Background Super Upload
+
+### What's new
+
+- Upload batches while using other apps or keeping ChatPretzel minimised.
+- A new **Start batch upload?** dialog appears when you paste, drop, or choose more than 10 files. **Yes** or **Enter** starts the entire queue, including the first message. **No** sends nothing and preserves your draft.
+- Your existing instruction is included above the first progress note. Each batch waits for ChatGPT to finish responding before the next batch is sent.
+- The frosted progress screen locks the conversation against accidental changes while keeping **Cancel** available. Hiding or minimising the app does not cancel the queue.
+
+### Reliability fixes
+
+- Keep active uploads running without App Nap or automatic idle system sleep. On macOS 14 and later, temporarily disable WebKit's inactive-page suspension. Restore normal scheduling when the queue finishes or stops.
+- Recognise completed responses when response controls fade in an inactive window, while still checking the current conversation, reply and idle state.
+- Handle new-chat URL transitions, canonical conversation routes, long conversations and virtualised messages more reliably.
+- Improve confirmation of image attachments and spreadsheet/table previews, including filename suffixes.
+- Improve delayed-send handling, batch-state cleanup and stopped-queue reporting to reduce duplicate or premature sends.
+
+Duplicate filenames remain supported through temporary upload-only copies; originals are unchanged. Clearly identified failed files are skipped and reported. Ambiguous failures stop the queue for review.
+
+### Installation and limits
+
+Download the DMG, open it, and drag ChatPretzel to Applications. Requires an **Apple Silicon Mac with macOS 13 or later**. The app is ad-hoc signed, not Developer ID signed or notarised. Use password sign-in if passkeys do not work in the embedded web view.
+
+Super Upload is designed for regular **Chat**, not Work. Keep ChatPretzel open and connected. Manually sleeping the Mac, closing its lid or losing the connection can interrupt uploads. Cancelling does not retract messages already sent. ChatGPT's own account and upload limits still apply.
+
+### Verification
+
+- 72 JavaScript regression tests passed.
+- Native AppKit/WebKit tests verified 25 files in 10 + 10 + 5 with the window hidden, preservation of the first draft, No sending nothing, and cancellation preventing later batches.
+- The installed sandboxed build sent 21 synthetic files in 10 + 10 + 1 while minimised with Finder active. ChatGPT confirmed all 21 files. The maintainer also confirmed the build worked in normal use.
+- The full XCTest suite remains unavailable with the selected local toolchain. Multi-hour runs, manual sleep recovery and every supported macOS version have not been independently verified.
+
+This release packages the tested build 26 code with updated version metadata; no additional app features were added during release preparation.
+
+ChatPretzel is an independent, unofficial project, not affiliated with, endorsed by, or sponsored by OpenAI.
+
 ## 0.3.0 — build 15
 
 ### Super Upload

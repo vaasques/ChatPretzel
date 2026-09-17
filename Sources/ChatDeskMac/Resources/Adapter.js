@@ -68,6 +68,10 @@
     const last = actions[actions.length - 1];
     return messageSignature(last?.closest?.('[data-testid^="conversation-turn-"], article') || last);
   }
+  function latestUserSignature() {
+    const messages = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
+    return messages.length ? messageSignature(messages[messages.length - 1]) : '';
+  }
   function attachmentName(node) {
     if (!node) return '';
     const direct = ['data-file-name', 'data-filename', 'data-name', 'title', 'aria-label']
@@ -136,9 +140,37 @@
     if (root.matches?.('[data-testid^="conversation-turn-"], article')) {
       for (const control of Array.from(root.querySelectorAll?.('button, [role="button"], a[href], [role="group"][aria-label]') || [])) {
         if (!visible(control)) continue;
-        const name = normalizedMessageText(control.getAttribute?.('aria-label') || control.getAttribute?.('title') || control.textContent || '').split('\n')[0];
+        const label = normalizedMessageText(control.getAttribute?.('aria-label') || control.getAttribute?.('title') || control.textContent || '').split('\n')[0];
+        const imageLabel = label.match(/^(?:open image(?: \d+ of \d+)?|öppna bild(?: \d+ av \d+)?):\s*(.+)$/i);
+        const name = imageLabel ? imageLabel[1] : label;
         if (!expected.includes(name) || explicit.some(card => card.node === control || card.node.contains?.(control) || control.contains?.(card.node))) continue;
         explicit.push({node: control, name});
+      }
+      // Table/file previews in a sent user turn do not expose filename
+      // attributes. Accept only a uniquely matching title stem with the
+      // preview's download/expand controls; arbitrary prose is never evidence.
+      const stem = value => normalizedMessageText(basename(value)).replace(/\.(?:csv|tsv|xlsx?|ods)$/i, '').replace(/[\s_-]+/g, ' ').toLowerCase();
+      const tableNames = [...new Set(superUpload?.boundFileNames || superUpload?.expectedFiles || [])];
+      const tableSelector = '[role="table"], [role="grid"], table';
+      for (const preview of Array.from(root.querySelectorAll?.(tableSelector) || [])) {
+        // ChatGPT's canvas spreadsheet exposes a non-rendered semantic table
+        // as canvas fallback content. Bind evidence to the visible canvas,
+        // never to an arbitrary hidden table elsewhere in the turn.
+        const canvas = preview.closest?.('canvas');
+        if (!visible(preview) && !(canvas && visible(canvas))) continue;
+        // Scroll/viewport wrappers can put the header several levels above the
+        // table. The turn boundary, unique table and exact title still bind it.
+        for (let parent = preview.parentElement, depth = 0; parent && parent !== root && depth < 12; parent = parent.parentElement, depth++) {
+          if (parent.querySelectorAll?.(tableSelector).length !== 1) break;
+          const title = parent.getAttribute?.('aria-label') || parent.getAttribute?.('title')
+            || String(parent.innerText || '').split('\n').map(line => line.trim()).find(Boolean) || '';
+          const matches = tableNames.filter(name => /\.(?:csv|tsv|xlsx?|ods)$/i.test(name) && stem(name) === stem(title));
+          const controls = Array.from(parent.querySelectorAll?.('button, [role="button"]') || []).filter(visible);
+          if (matches.length === 1 && controls.length >= 2) {
+            if (!explicit.some(card => card.node === parent || card.node.contains?.(preview))) explicit.push({node: parent, name: matches[0]});
+            break;
+          }
+        }
       }
     }
     return explicit;
@@ -290,8 +322,18 @@
     };
   }
   function languageSample() {
-    return Array.from(document.querySelectorAll('[data-message-author-role="user"]')).slice(-4)
-      .map(node => String(node.innerText || '')).join('\n').slice(-8000);
+    const messages = Array.from(document.querySelectorAll('[data-message-author-role="user"]')).slice(-4);
+    return messages.map(node => {
+      // File cards and table previews often contribute their title/filename to
+      // innerText.  Prefer the actual message text nodes and strip only known
+      // preview/card subtrees; never use arbitrary page prose as a sample.
+      const copy = node.cloneNode?.(true);
+      if (copy?.querySelectorAll) {
+        copy.querySelectorAll('[data-chatdesk-attachment], [data-testid*="attachment"], [data-testid*="file"], [data-file-name], [data-filename], [role="table"], table').forEach(child => child.remove?.());
+        return String(copy.innerText || copy.textContent || '');
+      }
+      return String(node.innerText || '');
+    }).join('\n').slice(-8000);
   }
   function sendButton(c) {
     const form = c?.closest('form');
@@ -382,6 +424,56 @@
     return {ok: true, requested: true}; // A request is NOT confirmation that files uploaded.
   }
   function cancelFiles() { pending = null; lastClickedFileInput = null; return {ok: true}; }
+  function removePreparedSuffix(session) {
+    if (!session?.appendedSuffix || session.appendedDocumentID !== documentID
+        || session.appendedHref !== href()) return false;
+    const c = composer();
+    const current = draftText(c);
+    if (!c) return false;
+    if (!current.endsWith(session.appendedSuffix) && typeof c.setSelectionRange === 'function') return false;
+    const suffixStart = current.length - session.appendedSuffix.length;
+    if (typeof c.setSelectionRange === 'function') {
+      c.focus(); c.setSelectionRange(suffixStart, current.length);
+      if (document.execCommand?.('delete')) return true;
+      if (typeof c.setRangeText === 'function') { c.setRangeText('', suffixStart, current.length, 'end'); return true; }
+      // Test/fallback textarea controls have no native delete command. The
+      // range check above guarantees that only the exact app suffix is removed.
+      c.value = current.slice(0, suffixStart);
+      return true;
+    }
+    // Contenteditable composers need a DOM range so React/ProseMirror sees a
+    // normal editor deletion. Walk text nodes to select only the exact suffix.
+    // Paragraph boundaries can make innerText and textContent differ. If the
+    // draft is still byte-for-byte the prepared draft, replace it through the
+    // editor command with the original prefix; this cannot erase user edits.
+    if (session.appendedDraft && current === session.appendedDraft && document.execCommand && globalThis.getSelection) {
+      const selection = globalThis.getSelection(); const range = document.createRange?.();
+      if (range) { range.selectNodeContents(c); selection.removeAllRanges(); selection.addRange(range); return !!document.execCommand('insertText', false, session.appendedPrefix || ''); }
+    }
+    const rootText = String(c.textContent || '');
+    if (!rootText.endsWith(session.appendedSuffix) || !document.createRange || !globalThis.getSelection) return false;
+    const start = rootText.length - session.appendedSuffix.length;
+    const textNodes = [];
+    const collect = node => {
+      if (node?.nodeType === 3) textNodes.push(node);
+      else Array.from(node?.childNodes || []).forEach(collect);
+    };
+    collect(c);
+    let offset = 0, startPoint = null, endPoint = null;
+    for (const node of textNodes) {
+      const next = offset + String(node.nodeValue || '').length;
+      if (!startPoint && start >= offset && start <= next) startPoint = [node, start - offset];
+      if (!endPoint && rootText.length >= offset && rootText.length <= next) endPoint = [node, rootText.length - offset];
+      offset = next;
+    }
+    if (!startPoint || !endPoint) return false;
+    const range = document.createRange();
+    range.setStart?.(startPoint[0], startPoint[1]); range.setEnd?.(endPoint[0], endPoint[1]);
+    const selection = globalThis.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    if (document.execCommand?.('delete')) return true;
+    if (range.deleteContents) { range.deleteContents(); return true; }
+    return false;
+  }
   function beginSuperUpload(args) {
     const c = composer();
     if (!c) return {ok: false, error: 'ChatGPT\'s message field could not be found.'};
@@ -395,8 +487,9 @@
     if (draft.length > 60000) return {ok: false, error: 'The existing draft is too long for a Super Upload progress message.'};
     superUpload = {token: args.token, input: selected.input, documentID, phase: 'preparing',
       expectedDraft: null, expectedDraftKey: '', userIntent: false, intentAt: 0,
-      baselineUserMessages: 0, baselineAssistantMessages: 0, baselineAssistantSignature: '',
-      expectedFiles: [], attachmentBaseline: []};
+      baselineUserMessages: messageCounts().userMessages, baselineAssistantMessages: messageCounts().assistantMessages, baselineUserSignature: latestUserSignature(), baselineAssistantSignature: '',
+      expectedFiles: [], attachmentBaseline: [], batchSerial: 0, appendedBatchSerial: null,
+      appendedSuffix: '', appendedHref: '', appendedDocumentID: documentID, configuredOnce: false};
     return {...context(), ...messageCounts(), ok: true, accepted: selected.accepted, draft,
       languageSample: languageSample(), documentLanguage: String(document.documentElement?.lang || '').slice(0, 40),
       alertText: visibleAlertText()};
@@ -408,8 +501,20 @@
         || !Array.isArray(args.expectedFiles) || args.expectedFiles.length > 100) return {ok: false, error: 'Invalid Super Upload batch configuration.'};
     const names = args.expectedFiles.map(basename).map(normalizedMessageText).filter(Boolean);
     if (names.length !== args.expectedFiles.length) return {ok: false, error: 'Expected file names must be non-empty basenames.'};
+    // The first configuration belongs to the initial batch and must retain the
+    // begin-time baseline, so a manual send before configuration is detected.
+    // Later batches start after the prior batch's user message was observed.
+    if (superUpload.configuredOnce) {
+      const counts = messageCounts();
+      superUpload.baselineUserMessages = counts.userMessages;
+      superUpload.baselineAssistantMessages = counts.assistantMessages;
+      superUpload.baselineUserSignature = latestUserSignature();
+    }
+    superUpload.configuredOnce = true;
     superUpload.expectedFiles = names; superUpload.boundFileNames = null;
     superUpload.phase = 'preparing';
+    superUpload.batchSerial += 1; superUpload.appendedBatchSerial = null;
+    superUpload.appendedSuffix = ''; superUpload.appendedHref = '';
     superUpload.userIntent = false; superUpload.intentAt = 0;
     superUpload.attachmentBaseline = composerAttachmentCards(composer()).map(card => card.name);
     return {ok: true, expectedFiles: names.slice(), attachmentBaseline: superUpload.attachmentBaseline.slice()};
@@ -439,8 +544,25 @@
       return {ok: false, error: 'The Super Upload progress message could not be prepared.'};
     }
     const automatic = args.automatic === true;
+    const authorizeFirstSend = args.authorizeFirstSend === true;
+    // A native Yes may authorise the first automatic send while preserving the
+    // user's existing draft. Later automatic batches must still be append-only
+    // and require an empty composer, so this exception is explicit and one-shot.
+    if (authorizeFirstSend && (!automatic || superUpload.batchSerial !== 1)) {
+      return {ok: false, error: 'The first-send authorisation is valid only for the initial automatic batch.'};
+    }
+    if (superUpload.phase !== 'preparing' || superUpload.appendedBatchSerial === superUpload.batchSerial) {
+      return {ok: false, error: 'The Super Upload batch already has a prepared progress message.'};
+    }
+    // A trusted manual send can clear the composer before the native poller
+    // reaches this call. Never append a stale first-batch note afterwards.
+    if (messageCounts().userMessages > superUpload.baselineUserMessages
+        || (superUpload.baselineUserSignature && latestUserSignature() !== superUpload.baselineUserSignature)
+        || superUpload.userIntent) {
+      return {ok: false, error: 'A message was already sent for this Super Upload batch. No progress message was appended.'};
+    }
     const before = draftText(c);
-    if (automatic && before.length) return {ok: false, error: 'The message field changed while Super Upload was waiting. Nothing was overwritten or sent.'};
+    if (automatic && before.length && !authorizeFirstSend) return {ok: false, error: 'The message field changed while Super Upload was waiting. Nothing was overwritten or sent.'};
     const addition = `${before.length ? '\n\n' : ''}${args.text}`;
     if (before.length + addition.length > 65536) {
       return {ok: false, error: 'The existing instruction is too long to append a Super Upload progress message safely.'};
@@ -453,8 +575,11 @@
     const counts = messageCounts();
     superUpload.phase = automatic ? 'ready-auto' : 'waiting-user';
     superUpload.expectedDraft = after; superUpload.expectedDraftKey = normalizedMessageText(after);
+    superUpload.appendedSuffix = addition; superUpload.appendedDraft = after; superUpload.appendedPrefix = before; superUpload.appendedHref = href();
+    superUpload.appendedDocumentID = documentID; superUpload.appendedBatchSerial = superUpload.batchSerial;
     superUpload.userIntent = false; superUpload.intentAt = 0;
     superUpload.baselineUserMessages = counts.userMessages;
+    superUpload.baselineUserSignature = latestUserSignature();
     superUpload.baselineAssistantMessages = counts.assistantMessages;
     superUpload.baselineAssistantSignature = latestAssistantSignature();
     return {...context(), ...counts, ok: true, draft: after, alertText: visibleAlertText()};
@@ -466,7 +591,9 @@
     }
     const button = sendButton(c), uploading = uploadInProgress(c), counts = messageCounts();
     const busy = generationInProgress();
-    const submittedDraftMatches = lastUserMatchesExpected();
+    const userMessageChanged = counts.userMessages > superUpload.baselineUserMessages
+      || (!!latestUserSignature() && latestUserSignature() !== superUpload.baselineUserSignature);
+    const submittedDraftMatches = userMessageChanged && lastUserMatchesExpected();
     const initialMessageAppeared = superUpload.phase === 'waiting-user'
       && (counts.userMessages > superUpload.baselineUserMessages
         || (superUpload.userIntent && submittedDraftMatches));
@@ -494,8 +621,18 @@
     const latestUserTurn = Array.from(document.querySelectorAll('[data-message-author-role="user"]')).slice(-1)[0]?.closest?.('[data-testid^="conversation-turn-"], article');
     const followsSubmittedUser = submittedDraftMatches && !!latestUserTurn && !!assistantTurn
       && !!(latestUserTurn.compareDocumentPosition?.(assistantTurn) & 4);
+    const submittedCards = latestUserTurn ? attachmentCards(latestUserTurn) : [];
+    const submittedNames = superUpload.boundFileNames || expectedFiles;
+    // Inactive/background WebKit can fade response controls to opacity:0. Keep
+    // the strict new-assistant/new-user binding, but accept a settled non-empty
+    // assistant turn when its action controls exist but are not visible.
+    const responseActions = Array.from(assistantTurn?.querySelectorAll?.('[data-testid="copy-turn-action-button"], [data-testid*="turn-action"], button[aria-label*="Copy"]') || [])
+      .filter(node => node.isConnected !== false);
+    const responseTextPresent = normalizedMessageText(assistantTurn?.innerText || assistantTurn?.textContent || '').length > 0;
+    const responseCompletionEvidence = responseActions.some(visible)
+      || (responseActions.length > 0 && responseTextPresent && idleResponseControl(c));
     const assistantResponseComplete = assistantResponseObserved && followsSubmittedUser && !busy && !!assistantTurn
-      && Array.from(assistantTurn.querySelectorAll?.('[data-testid="copy-turn-action-button"], [data-testid*="turn-action"], button[aria-label*="Copy"]') || []).some(visible);
+      && responseCompletionEvidence;
     return {...context(), ...counts, ok: true, phase: superUpload.phase,
       draft: draftText(c), draftMatchesExpected: draftMatchesExpected(c),
       lastUserMatchesExpected: submittedDraftMatches,
@@ -505,7 +642,9 @@
       attachmentsReady: !uploading && !failedByName.size && boundNames !== null,
       failedFiles, attachmentError,
       assistantResponseObserved, assistantResponseComplete, assistantSignature,
-      submittedAttachmentsMatch: (() => { const turn = Array.from(document.querySelectorAll('[data-message-author-role="user"]')).slice(-1)[0]?.closest?.('[data-testid^="conversation-turn-"], article'); return !!turn && submittedDraftMatches && superUpload.boundFileNames !== null && cardsMatchNames(attachmentCards(turn), superUpload.boundFileNames || expectedFiles); })(),
+      submittedAttachmentsMatch: !!latestUserTurn && submittedDraftMatches && superUpload.boundFileNames !== null && cardsMatchNames(submittedCards, submittedNames),
+      submittedAttachmentCount: submittedCards.length,
+      unconfirmedFiles: submittedNames.filter(name => !submittedCards.some(card => card.name === name)),
       userIntent: superUpload.userIntent, intentAt: superUpload.intentAt, uploading,
       busy, idleResponseControl: !busy && idleResponseControl(c),
       sendReady: !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' && !uploading && !busy,
@@ -530,6 +669,7 @@
   }
   function endSuperUpload(args) {
     if (!superUpload || superUpload.token !== args.token) return {ok: false};
+    removePreparedSuffix(superUpload);
     superUpload = null; return {ok: true};
   }
   function getDraft() {
@@ -616,7 +756,7 @@
     }
     const input = event.target?.closest?.('input[type="file"]');
     if (input) lastClickedFileInput = input;
-    if (event.isTrusted && superUpload?.phase === 'waiting-user') {
+    if (event.isTrusted && ['waiting-user', 'preparing'].includes(superUpload?.phase)) {
       const c = composer(), button = sendButton(c);
       if (button && (event.target === button || button.contains?.(event.target))) {
         superUpload.userIntent = true; superUpload.intentAt = Date.now();
@@ -626,11 +766,11 @@
     // Conservative session-memory clearing on explicit account/workspace UI interaction.
     // This is NOT a reliable account identifier, so there is no automatic draft reinsertion.
     if (event.isTrusted && event.target?.closest?.('[data-testid="profile-button"], [data-testid="accounts-profile-button"], [data-testid="workspace-switcher"], a[href*="/auth/logout"]')) {
-      cancelFiles(); superUpload = null; post({kind: 'privacyBoundary'});
+      cancelFiles(); removePreparedSuffix(superUpload); superUpload = null; post({kind: 'privacyBoundary'});
     }
   }
   function onKeyDown(event) {
-    if (!event.isTrusted || superUpload?.phase !== 'waiting-user' || event.isComposing
+    if (!event.isTrusted || !['waiting-user', 'preparing'].includes(superUpload?.phase) || event.isComposing
         || event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
     const c = composer();
     if (c && (event.target === c || c.contains(event.target))) {
@@ -642,7 +782,7 @@
   }
   function onSubmit(event) {
     const c = composer();
-    if (event.isTrusted && superUpload?.phase === 'waiting-user' && c?.closest('form') === event.target) {
+    if (event.isTrusted && ['waiting-user', 'preparing'].includes(superUpload?.phase) && c?.closest('form') === event.target) {
       superUpload.userIntent = true; superUpload.intentAt = Date.now();
       if (normalizedMessageText(draftText(c))) {
         superUpload.expectedDraft = draftText(c); superUpload.expectedDraftKey = normalizedMessageText(superUpload.expectedDraft);
@@ -650,7 +790,7 @@
     }
   }
   function teardown() {
-    disposed = true; clearTimeout(draftTimer); cancelFiles(); superUpload = null;
+    disposed = true; clearTimeout(draftTimer); cancelFiles(); removePreparedSuffix(superUpload); superUpload = null;
     document.removeEventListener('input', onInput, true);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('copy', onCopy, true);

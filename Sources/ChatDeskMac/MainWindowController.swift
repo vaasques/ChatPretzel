@@ -28,6 +28,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     private let search = NSSearchField()
     private let searchRow = NSStackView()
     private var navigationGeneration: UInt64 = 0
+    private var superUploadConfirmationPending = false
     private var observedURL: URL?
     private var knownDocumentID: String?
     private var drafts = DraftBuffer()
@@ -147,8 +148,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
                 self.notice("Super Upload is already running. The dropped files were not added to its queue.")
                 return true
             }
-            self.attachments.start(selection, requireFocus: false)
-            self.showTransfersIfFailedRepresentations(selection)
+            if !self.requestSuperUpload(selection) {
+                self.attachments.start(selection, requireFocus: false)
+                self.showTransfersIfFailedRepresentations(selection)
+            }
             return true
         }
         webView.onUnsupportedDrop = { [weak self] in self?.notice($0) }
@@ -206,7 +209,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         superUploadOverlay.update(processed: progress.processedFiles, total: progress.totalFiles)
         superUploadOverlay.isHidden = false
         window?.standardWindowButton(.closeButton)?.isEnabled = false
-        window?.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+        window?.standardWindowButton(.miniaturizeButton)?.isEnabled = true
         window?.standardWindowButton(.zoomButton)?.isEnabled = false
         window?.makeFirstResponder(superUploadOverlay)
     }
@@ -248,7 +251,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
         switch ClipboardReader.read(.general) {
         case .files(let selection):
-            if !superUpload.start(selection) {
+            if !requestSuperUpload(selection) {
                 attachments.start(selection, requireFocus: true)
                 showTransfersIfFailedRepresentations(selection)
             }
@@ -276,8 +279,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
                         self.notice("The page changed while Mail was preparing the attachments. No files were sent.")
                         return
                     }
-                    if self.superUpload.start(selection) {
-                        if !self.superUpload.isActive { self.mailAttachments.release(selection.id) }
+                    if self.requestSuperUpload(selection) {
+                        // The confirmation owns Mail's temporary files until
+                        // it is declined or the authorised queue releases them.
                     } else if !self.attachments.start(selection, requireFocus: true) {
                         self.mailAttachments.release(selection.id)
                     }
@@ -290,6 +294,61 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     }
     private func showTransfersIfFailedRepresentations(_ selection: FileSelection) {
         if selection.rejectedRepresentations > 0 { showTransfers() }
+    }
+    static func batchUploadConfirmation(fileCount: Int) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Start batch upload?"
+        alert.informativeText = "Upload \(fileCount) selected files in batches of up to 10? Your current message will be included with the first batch. ChatPretzel will send each batch automatically, wait for ChatGPT's reply, and continue while you use other apps. Keep ChatPretzel open. You can cancel the remaining batches at any time."
+        alert.addButton(withTitle: "Yes").keyEquivalent = "\r"
+        alert.addButton(withTitle: "No").keyEquivalent = "\u{1b}"
+        return alert
+    }
+
+    /// A native confirmation authorises the complete operation, including its
+    /// first send. Declining never falls back to uploading the whole selection.
+    @discardableResult
+    func requestSuperUpload(_ selection: FileSelection) -> Bool {
+        let count = selection.urls.count + selection.rejectedRepresentations
+        guard count > SuperUploadPlan.defaultBatchSize else { return false }
+        guard !superUploadConfirmationPending, !superUpload.isActive else {
+            mailAttachments.release(selection.id)
+            notice("A batch upload is already pending. No additional files were added.")
+            return true
+        }
+        let generation = navigationGeneration
+        let page = webView.url
+        superUploadConfirmationPending = true
+        // A file chooser sheet may still be finishing its dismissal callback.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard let window = self.window, window.attachedSheet == nil,
+                  self.navigationGeneration == generation, self.webView.url == page else {
+                self.superUploadConfirmationPending = false
+                self.mailAttachments.release(selection.id)
+                self.notice("The page or dialog changed. No batch upload was started.")
+                return
+            }
+            Self.batchUploadConfirmation(fileCount: count).beginSheetModal(for: window) { [weak self] response in
+                guard let self else { return }
+                self.superUploadConfirmationPending = false
+                guard response == .alertFirstButtonReturn else {
+                    self.mailAttachments.release(selection.id)
+                    self.notice("Batch upload was not started. No files or messages were sent.")
+                    return
+                }
+                guard self.navigationGeneration == generation, self.webView.url == page,
+                      !self.superUpload.isActive else {
+                    self.mailAttachments.release(selection.id)
+                    self.notice("The conversation changed. No batch upload was started.")
+                    return
+                }
+                if !self.superUpload.start(selection, automaticallySendFirstBatch: true)
+                    || !self.superUpload.isActive {
+                    self.mailAttachments.release(selection.id)
+                }
+            }
+        }
+        return true
     }
     func pasteFromMenu() {
         if blockInteractionWhileUploading() { return }
@@ -331,7 +390,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK else { return }
             guard self.navigationGeneration == expected, self.webView.url == page else { self.notice("The page changed. No files were sent."); return }
-            self.attachments.start(FileSelection(urls: panel.urls), requireFocus: false)
+            let selection = FileSelection(urls: panel.urls)
+            if !self.requestSuperUpload(selection) {
+                self.attachments.start(selection, requireFocus: false)
+            }
         }
     }
     @objc func showTransfers() {

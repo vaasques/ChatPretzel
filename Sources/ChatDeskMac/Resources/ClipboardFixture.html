@@ -88,7 +88,8 @@ async function receive(files, source) {
   document.getElementById('fixture-form').setAttribute('data-state','uploading');
   render();
   for (const file of captured) {
-    const displayName=window.fixtureRenameUploads?file.name.replace(/(?=\.[^.]+$|$)/,'(1)'):file.name;
+    const renameSuffix=String(window.fixtureRenameSuffix||'1').replace(/[^0-9]/g,'')||'1';
+    const displayName=window.fixtureRenameUploads?file.name.replace(/(?=\.[^.]+$|$)/,`(${renameSuffix})`):file.name;
     const card=document.createElement('div');card.dataset.fixtureName=file.name;card.setAttribute('aria-label',displayName);
     const label=document.createElement('button');label.type='button';label.setAttribute('aria-label',displayName);label.textContent=displayName;card.append(label);
     const remove=document.createElement('button');remove.type='button';remove.setAttribute('aria-label',`Ta bort fil ${captured.indexOf(file)+1}: ${displayName}`);remove.textContent='Remove';remove.onclick=()=>card.remove();card.append(remove);
@@ -137,7 +138,42 @@ document.getElementById('fixture-form').addEventListener('submit',event=>{
     window.fixtureReport.sentNames.push(...cards.map(card=>card.dataset.fixtureName));
     window.fixtureReport.sentMessages.push(text);
     if(window.fixtureVirtualizeMessages)document.querySelector('[data-message-author-role="user"]')?.remove();
-    if(text){const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-user-${window.fixtureReport.submitted}`;const message=document.createElement('div');message.dataset.messageAuthorRole='user';message.innerText=text;turn.append(message,...cards);for(const card of cards)card.querySelector('button[aria-label^="Ta bort fil"]')?.remove();document.body.append(turn);}
+    if(text){const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-user-${window.fixtureReport.submitted}`;const message=document.createElement('div');message.dataset.messageAuthorRole='user';message.innerText=text;turn.append(message,...cards);for(const card of cards){
+      card.querySelector('button[aria-label^="Ta bort fil"]')?.remove();
+      if(window.fixtureTablePreviews){
+        const title=card.querySelector('button')?.textContent.replace(/\.csv$/i,'').replace(/_/g,' ');
+        card.removeAttribute('aria-label');card.replaceChildren();
+        const header=document.createElement('div');header.textContent=title;
+        header.append(document.createElement('button'),document.createElement('button'));
+        const canvasGrid=!!window.fixtureCanvasGridPreviews;
+        const table=document.createElement(canvasGrid||!window.fixtureGridPreviews?'table':'div');
+        if(window.fixtureGridPreviews){
+          table.setAttribute('role','grid');
+          const row=document.createElement('div');row.setAttribute('role','row');
+          const headerCell=document.createElement('div');headerCell.setAttribute('role','columnheader');headerCell.textContent='Value';
+          const cell=document.createElement('div');cell.setAttribute('role','gridcell');cell.textContent='1';
+          row.append(headerCell,cell);table.append(row);
+        } else table.innerHTML='<tbody><tr><th>Value</th></tr><tr><td>1</td></tr></tbody>';
+        if(window.fixtureDeepTablePreview){
+          // Reproduce the live ChatGPT preview nesting: the table and its
+          // title/actions can be several wrappers below the user turn.
+          const preview=document.createElement('div');preview.setAttribute('aria-label',title);
+          preview.append(header);
+          let nested=preview;
+          for(let depth=0;depth<6;depth++){
+            const wrapper=document.createElement('div');nested.append(wrapper);nested=wrapper;
+          }
+          if(canvasGrid){
+            // ChatGPT's spreadsheet preview exposes a hidden semantic grid as
+            // fallback content inside a visible canvas.
+            const canvas=document.createElement('canvas');
+            canvas.width=480;canvas.height=90;canvas.setAttribute('aria-label',title);
+            canvas.append(table);nested.append(canvas);
+          } else nested.append(table);
+          card.append(preview);
+        } else card.append(header,table);
+      }
+    }document.body.append(turn);}
     window.fixtureReport.submitted++;render();
     const reply=()=>{
       document.querySelector('[data-testid="stop-button"]')?.remove();

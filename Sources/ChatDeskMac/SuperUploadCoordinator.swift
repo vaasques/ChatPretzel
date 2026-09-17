@@ -1,6 +1,7 @@
 import Foundation
 import NaturalLanguage
 import Darwin
+import WebKit
 import ChatDeskCore
 
 /// Operation-scoped copies used only when ChatGPT would otherwise receive duplicate
@@ -140,8 +141,17 @@ struct SuperUploadRouteTracker: Sendable {
 
     private static func conversationID(in url: URL) -> String? {
         let parts = url.path.split(separator: "/", omittingEmptySubsequences: true)
-        guard parts.count >= 2, parts[0] == "c", !parts[1].isEmpty else { return nil }
-        return String(parts[1])
+        if parts.count == 2, parts[0] == "c", !parts[1].isEmpty {
+            return String(parts[1])
+        }
+        // Project/custom-GPT pages use /g/<project-id>/c/<conversation-id>.
+        // Treat the canonical /c/<id> form and this form as the same conversation,
+        // while keeping all other paths unbound and fail-closed.
+        if parts.count == 4, parts[0] == "g", !parts[1].isEmpty,
+           parts[2] == "c", !parts[3].isEmpty {
+            return String(parts[3])
+        }
+        return nil
     }
 
     private static func normalizedPath(_ value: String) -> String {
@@ -273,8 +283,14 @@ final class SuperUploadCoordinator {
         var expectedFiles: [String] = []
         var routeTracker: SuperUploadRouteTracker?
         var staging: SuperUploadFileStaging?
+        let automaticallySendFirstBatch: Bool
+        var activity: NSObjectProtocol?
+        // Store the availability-gated WebKit enum as its raw value so the
+        // session remains loadable on macOS 13 as well.
+        var previousInactiveSchedulingPolicyRawValue: Int?
+        weak var webView: WKWebView?
 
-        init(selection: FileSelection) {
+        init(selection: FileSelection, automaticallySendFirstBatch: Bool) {
             operationID = selection.id
             token = UUID().uuidString
             selectedCount = selection.urls.count + selection.rejectedRepresentations
@@ -282,6 +298,20 @@ final class SuperUploadCoordinator {
                 ? [SkippedItem(filename: nil, count: selection.rejectedRepresentations,
                                reason: .clipboardRepresentation)]
                 : []
+            self.automaticallySendFirstBatch = automaticallySendFirstBatch
+        }
+
+        deinit {
+            if let activity { ProcessInfo.processInfo.endActivity(activity) }
+            if #available(macOS 14.0, *), let raw = previousInactiveSchedulingPolicyRawValue,
+               let webView, let policy = WKPreferences.InactiveSchedulingPolicy(rawValue: raw) {
+                // Sessions are owned by the @MainActor coordinator. The explicit
+                // assumeIsolated fallback keeps deinit cleanup actor-correct if a
+                // cancelled session is released before normal stop() cleanup.
+                MainActor.assumeIsolated {
+                    webView.configuration.preferences.inactiveSchedulingPolicy = policy
+                }
+            }
         }
     }
 
@@ -290,8 +320,9 @@ final class SuperUploadCoordinator {
     private let io = DispatchQueue(label: "ChatPretzel.super-upload-preflight", qos: .userInitiated)
     private var session: Session?
     var onNotice: ((String) -> Void)?
-    /// Non-nil only after the user's first send has been observed. While non-nil, the
-    /// main window blocks interaction so the active conversation cannot be changed.
+    /// Non-nil after the user's first send, or immediately after an explicitly
+    /// authorised automatic start. While non-nil, the main window blocks interaction
+    /// so the active conversation cannot be changed.
     var onProgress: ((SuperUploadProgress?) -> Void)?
 
     var isActive: Bool { session != nil }
@@ -303,7 +334,7 @@ final class SuperUploadCoordinator {
 
     /// Super Upload is entered only from an explicit paste action containing more than ten items.
     @discardableResult
-    func start(_ selection: FileSelection) -> Bool {
+    func start(_ selection: FileSelection, automaticallySendFirstBatch: Bool = false) -> Bool {
         let selectedCount = selection.urls.count + selection.rejectedRepresentations
         guard selectedCount > SuperUploadPlan.defaultBatchSize else { return false }
         guard session == nil, !attachments.isBusy else {
@@ -315,13 +346,28 @@ final class SuperUploadCoordinator {
             return true
         }
 
-        let current = Session(selection: selection)
+        let current = Session(selection: selection, automaticallySendFirstBatch: automaticallySendFirstBatch)
         do { current.staging = try SuperUploadFileStaging(operationID: current.operationID) }
         catch {
             onNotice?("Super Upload could not create its temporary staging area. Nothing was sent.")
             return true
         }
         session = current
+        // A confirmed Yes authorises the complete queue, including while the app is
+        // inactive. Keep the lock from that boundary, before any asynchronous work.
+        if automaticallySendFirstBatch {
+            current.activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "ChatDesk Super Upload authorised queue")
+            if #available(macOS 14.0, *) {
+                if let webView = adapter.webView {
+                    current.webView = webView
+                    current.previousInactiveSchedulingPolicyRawValue = webView.configuration.preferences.inactiveSchedulingPolicy.rawValue
+                    webView.configuration.preferences.inactiveSchedulingPolicy = .none
+                }
+            }
+            onProgress?(SuperUploadProgress(processedFiles: 0, totalFiles: current.selectedCount))
+        }
         onNotice?("Super Upload is checking \(selectedCount) items locally. File contents are not loaded into app memory.")
         let urls = selection.urls
         let sessionToken = current.token
@@ -367,7 +413,9 @@ final class SuperUploadCoordinator {
             current.routeTracker = SuperUploadRouteTracker(startingURL: oldURL)
         }
         let maySettle = current.routeTracker?.isLocked != true
-            && (current.phase == .waitingInitialSubmission || current.phase == .waitingForAssistant)
+            && (current.phase == .waitingInitialSubmission
+                || current.phase == .waitingAutomaticSubmission
+                || current.phase == .waitingForAssistant)
         return current.routeTracker?.allowsChange(
             from: oldURL, to: newURL, maySettleConversation: maySettle) == true
     }
@@ -390,7 +438,8 @@ final class SuperUploadCoordinator {
         }
         current.phase = .beginning
         adapter.call("beginSuperUpload", arguments: [
-            "token": current.token, "types": descriptors, "requireFocus": true
+            "token": current.token, "types": descriptors,
+            "requireFocus": !current.automaticallySendFirstBatch
         ]) { [weak self, weak current] result in
             guard let self, let current, self.session === current else { return }
             guard case .success(let info) = result, Self.bool(info["ok"]),
@@ -453,7 +502,7 @@ final class SuperUploadCoordinator {
                 self.stop(Self.errorMessage(configured) ?? "ChatGPT could not bind the current batch of filenames.")
                 return
             }
-            attachments.start(batchSelection, requireFocus: current.batchIndex == 0,
+            attachments.start(batchSelection, requireFocus: current.batchIndex == 0 && !current.automaticallySendFirstBatch,
                               superUploadToken: current.token) { [weak self, weak current] result in
             guard let self, let current, self.session === current else { return }
             switch result {
@@ -530,9 +579,10 @@ final class SuperUploadCoordinator {
         let message = SuperUploadMessageBuilder.message(
             for: batch, language: current.language, selectedCount: current.selectedCount,
             skippedCount: current.skipped.reduce(0) { $0 + $1.count }, skipped: skipped)
-        let automatic = current.hasSubmittedInitial
+        let automatic = current.hasSubmittedInitial || current.automaticallySendFirstBatch
         adapter.call("appendSuperUploadMessage", arguments: [
-            "token": current.token, "text": message, "automatic": automatic
+            "token": current.token, "text": message, "automatic": automatic,
+            "authorizeFirstSend": current.automaticallySendFirstBatch && !current.hasSubmittedInitial
         ]) { [weak self, weak current] result in
             guard let self, let current, self.session === current else { return }
             guard case .success(let info) = result, Self.bool(info["ok"]),
@@ -548,7 +598,9 @@ final class SuperUploadCoordinator {
             current.initialIntentTime = nil
             current.emptyDraftSince = nil
             current.automaticSubmitTime = nil
-            current.deadline = Date().addingTimeInterval(automatic ? 2 * 60 : 30 * 60)
+            // The first batch is explicitly user-authorised. Do not expire its draft
+            // while the user is away; automatic batches retain their finite guard.
+            current.deadline = automatic ? Date().addingTimeInterval(2 * 60) : .distantFuture
             if automatic {
                 current.phase = .waitingAutomaticSubmission
                 self.pollAutomaticReady(current)
@@ -628,11 +680,8 @@ final class SuperUploadCoordinator {
     }
 
     private func pollInitialSubmission(_ current: Session) {
-        guard session === current, let plan = current.plan else { return }
-        guard Date() <= current.deadline else {
-            stop("Super Upload stopped because the first prepared batch was not sent. No additional batches were sent.")
-            return
-        }
+        guard session === current, current.plan != nil else { return }
+        // Waiting for the user's first Enter has no wall-clock expiration.
         readState(current) { [weak self, weak current] info in
             guard let self, let current, self.session === current else { return }
             let users = Self.integer(info["userMessages"]) ?? current.baselineUserMessages
@@ -650,13 +699,20 @@ final class SuperUploadCoordinator {
             if intent {
                 if current.initialIntentTime == nil { current.initialIntentTime = Date() }
                 if let expected = info["expectedDraft"] as? String, !expected.isEmpty { current.expectedDraft = expected }
-                if submittedMessageVisible && attachmentsMatch {
+                if Self.initialSubmissionConfirmed(
+                    users: users,
+                    baselineUsers: current.baselineUserMessages,
+                    userIntent: intent,
+                    lastUserMatchesExpected: submittedMessageVisible,
+                    submittedAttachmentsMatch: attachmentsMatch) {
                     current.hasSubmittedInitial = true
                     self.batchWasSubmitted(current)
                     return
                 }
                 if Date().timeIntervalSince(current.initialIntentTime ?? Date()) >= 60 {
-                    self.stop("Super Upload stopped because ChatGPT did not confirm the first sent message and its attachments within 60 seconds.")
+                    let count = Self.integer(info["submittedAttachmentCount"]) ?? 0
+                    let missing = (info["unconfirmedFiles"] as? [String] ?? []).prefix(10).joined(separator: ", ")
+                    self.stop("Super Upload could not confirm the first sent batch within 60 seconds (message: \(submittedMessageVisible ? "confirmed" : "unconfirmed"), attachment cards: \(count)/\(current.expectedFiles.count)).\(missing.isEmpty ? "" : " Unconfirmed: \(missing).")")
                     return
                 }
             }
@@ -838,7 +894,9 @@ final class SuperUploadCoordinator {
             }
             if let href = info["href"] as? String, let url = URL(string: href) {
                 let maySettle = current.routeTracker?.isLocked != true
-                    && (current.phase == .waitingInitialSubmission || current.phase == .waitingForAssistant)
+                    && (current.phase == .waitingInitialSubmission
+                        || current.phase == .waitingAutomaticSubmission
+                        || current.phase == .waitingForAssistant)
                 current.routeTracker?.observe(url, maySettleConversation: maySettle)
             }
             let alert = Self.normalizedAlert(info["alertText"])
@@ -862,6 +920,7 @@ final class SuperUploadCoordinator {
 
     private func finish(_ current: Session) {
         guard session === current, let plan = current.plan else { return }
+        releaseExecutionResources(current)
         session = nil
         onProgress?(nil)
         adapter.call("endSuperUpload", arguments: ["token": current.token]) { _ in }
@@ -874,13 +933,28 @@ final class SuperUploadCoordinator {
 
     private func stop(_ reason: String) {
         guard let current = session else { return }
+        releaseExecutionResources(current)
         session = nil
         onProgress?(nil)
         adapter.call("endSuperUpload", arguments: ["token": current.token]) { _ in }
         attachments.cancelSuperUpload(operationID: current.operationID, reason: reason)
         retireStaging(current)
-        let progress = current.submittedFiles > 0 ? " \(current.submittedFiles) files had already been submitted." : ""
+        let progress = current.submittedFiles > 0 ? " \(current.submittedFiles) files were confirmed in the conversation. Check the last message before retrying; an unconfirmed batch may also have been sent." : ""
         onNotice?("\(reason)\(progress) No additional batches will be sent.")
+    }
+
+    private func releaseExecutionResources(_ current: Session) {
+        if let activity = current.activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            current.activity = nil
+        }
+        if #available(macOS 14.0, *), let previous = current.previousInactiveSchedulingPolicyRawValue,
+           let webView = adapter.webView {
+            if let policy = WKPreferences.InactiveSchedulingPolicy(rawValue: previous) {
+                webView.configuration.preferences.inactiveSchedulingPolicy = policy
+            }
+            current.previousInactiveSchedulingPolicyRawValue = nil
+        }
     }
 
     private func releaseStagedBatch(_ current: Session) {
@@ -937,10 +1011,28 @@ final class SuperUploadCoordinator {
 
     private func later(_ current: Session, after delay: TimeInterval,
                        action: @escaping () -> Void) {
+        let scheduledAt = Date()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak current] in
             guard let self, let current, self.session === current else { return }
+            let suspended = Self.suspendedInterval(elapsed: Date().timeIntervalSince(scheduledAt), scheduledDelay: delay)
+            if suspended > 0 {
+                // A suspended main loop cannot observe upload progress. Preserve the
+                // remaining timeout, then let the normal page/evidence checks run.
+                // This neither reloads the page nor assumes a send succeeded.
+                if current.deadline != .distantFuture { current.deadline.addTimeInterval(suspended) }
+                current.initialIntentTime = current.initialIntentTime?.addingTimeInterval(suspended)
+                current.automaticSubmitTime = current.automaticSubmitTime?.addingTimeInterval(suspended)
+                current.readyChecks = 0
+                current.assistantReadyChecks = 0
+                current.assistantSignatureSince = Date()
+            }
             action()
         }
+    }
+
+    static func suspendedInterval(elapsed: TimeInterval, scheduledDelay: TimeInterval) -> TimeInterval {
+        let gap = elapsed - scheduledDelay
+        return gap.isFinite && gap > 30 ? gap : 0
     }
 
     nonisolated private static func reason(for error: FileValidationError) -> SkipReason {
@@ -985,6 +1077,20 @@ final class SuperUploadCoordinator {
     private static func integer(_ value: Any?) -> Int? {
         if let value = value as? Int { return value }
         return (value as? NSNumber)?.intValue
+    }
+
+    /// Exact evidence for the one user-authorised first send.  A count advance by
+    /// itself is insufficient because it could be an unrelated user message.
+    static func initialSubmissionConfirmed(users: Int,
+                                           baselineUsers: Int,
+                                           userIntent: Bool,
+                                           lastUserMatchesExpected: Bool,
+                                           submittedAttachmentsMatch: Bool) -> Bool {
+        // Message counts are not reliable in virtualized long conversations.  The
+        // bounded count check still rejects a clearly additional message, while the
+        // intent signal prevents an old identical message from being re-used after
+        // an idle/sleep timeout.
+        userIntent && users <= baselineUsers + 1 && lastUserMatchesExpected && submittedAttachmentsMatch
     }
 
     private static func normalizedAlert(_ value: Any?) -> String {

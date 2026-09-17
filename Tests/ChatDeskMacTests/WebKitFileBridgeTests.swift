@@ -8,6 +8,21 @@ import ChatDeskCore
 /// Must run on a Mac with a graphical session. Never touches the user's general pasteboard.
 @MainActor
 final class WebKitFileBridgeTests: XCTestCase {
+    func testBatchUploadConfirmationUsesEnglishYesNoAndKeyboardDefaults() {
+        let alert = MainWindowController.batchUploadConfirmation(fileCount: 25)
+        XCTAssertEqual(alert.messageText, "Start batch upload?")
+        XCTAssertTrue(alert.informativeText?.contains("25 selected files") == true)
+        XCTAssertEqual(alert.buttons.map(\.title), ["Yes", "No"])
+        XCTAssertEqual(alert.buttons.first?.keyEquivalent, "\r")
+        XCTAssertEqual(alert.buttons.dropFirst().first?.keyEquivalent, "\u{1b}")
+    }
+
+    func testSuspendedSchedulerExcludesSleepFromTimeouts() {
+        XCTAssertEqual(SuperUploadCoordinator.suspendedInterval(elapsed: 7201, scheduledDelay: 1), 7200)
+        XCTAssertEqual(SuperUploadCoordinator.suspendedInterval(elapsed: 1.2, scheduledDelay: 1), 0)
+        XCTAssertEqual(SuperUploadCoordinator.suspendedInterval(elapsed: -60, scheduledDelay: 1), 0)
+    }
+
     func testSuperUploadOverlayUsesEnglishProgressAndCancel() {
         _ = NSApplication.shared
         let overlay = SuperUploadOverlayView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -28,6 +43,8 @@ final class WebKitFileBridgeTests: XCTestCase {
         let firstQuery = try XCTUnwrap(URL(string: "https://chatgpt.com/c/first?model=test#bottom"))
         let second = try XCTUnwrap(URL(string: "https://chatgpt.com/c/second"))
         let library = try XCTUnwrap(URL(string: "https://chatgpt.com/library"))
+        let projectFirst = try XCTUnwrap(URL(string: "https://chatgpt.com/g/g-project/c/first"))
+        let projectSecond = try XCTUnwrap(URL(string: "https://chatgpt.com/g/g-project/c/second"))
 
         var beforeSend = try XCTUnwrap(SuperUploadRouteTracker(startingURL: home))
         XCTAssertFalse(beforeSend.allowsChange(from: home, to: first, maySettleConversation: false))
@@ -42,6 +59,37 @@ final class WebKitFileBridgeTests: XCTestCase {
         var existing = try XCTUnwrap(SuperUploadRouteTracker(startingURL: first))
         XCTAssertTrue(existing.allowsChange(from: first, to: firstQuery, maySettleConversation: false))
         XCTAssertFalse(existing.allowsChange(from: first, to: second, maySettleConversation: true))
+
+        var project = try XCTUnwrap(SuperUploadRouteTracker(startingURL: projectFirst))
+        XCTAssertTrue(project.allowsChange(from: projectFirst, to: firstQuery, maySettleConversation: false))
+        XCTAssertTrue(project.allowsChange(from: projectFirst, to: projectFirst, maySettleConversation: false))
+        XCTAssertFalse(project.allowsChange(from: projectFirst, to: projectSecond, maySettleConversation: false))
+
+        var canonical = try XCTUnwrap(SuperUploadRouteTracker(startingURL: first))
+        XCTAssertTrue(canonical.allowsChange(from: first, to: projectFirst, maySettleConversation: false))
+    }
+
+    func testInitialSubmissionEvidenceRequiresExactMessageAndAttachments() {
+        XCTAssertTrue(SuperUploadCoordinator.initialSubmissionConfirmed(
+            users: 11, baselineUsers: 10,
+            userIntent: true,
+            lastUserMatchesExpected: true, submittedAttachmentsMatch: true))
+        XCTAssertTrue(SuperUploadCoordinator.initialSubmissionConfirmed(
+            users: 10, baselineUsers: 10,
+            userIntent: true,
+            lastUserMatchesExpected: true, submittedAttachmentsMatch: true))
+        XCTAssertFalse(SuperUploadCoordinator.initialSubmissionConfirmed(
+            users: 10, baselineUsers: 10,
+            userIntent: false,
+            lastUserMatchesExpected: true, submittedAttachmentsMatch: true))
+        XCTAssertFalse(SuperUploadCoordinator.initialSubmissionConfirmed(
+            users: 12, baselineUsers: 10,
+            userIntent: true,
+            lastUserMatchesExpected: true, submittedAttachmentsMatch: true))
+        XCTAssertFalse(SuperUploadCoordinator.initialSubmissionConfirmed(
+            users: 11, baselineUsers: 10,
+            userIntent: true,
+            lastUserMatchesExpected: true, submittedAttachmentsMatch: false))
     }
 
     func testOriginalFilesThroughRealWebKitPicker() async throws {

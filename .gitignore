@@ -4,6 +4,9 @@ dist/
 work/
 outputs/
 test-results/
+!test-results/
+test-results/*
+!test-results/BackgroundUploadHarness.swift
 CHECKSUMS.sha256
 AGENTS.md
 HANDOFF_TO_CODEX.md

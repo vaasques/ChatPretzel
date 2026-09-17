@@ -4,7 +4,8 @@ import vm from 'node:vm';
 import fs from 'node:fs';
 const source=fs.readFileSync(new URL('../../Sources/ChatDeskMac/Resources/Adapter.js',import.meta.url),'utf8');
 function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText='',draft='keep',
-                      documentLanguage='en',autoReply=true,attachments=[],observedFileMarkup=false}={}) {
+                      documentLanguage='en',autoReply=true,attachments=[],observedFileMarkup=false,
+                      idleVoice=false}={}) {
   const listeners=new Map(),calls=[],userMessages=[],assistantMessages=[],alerts=[];
   const copiedTypes=new Map(),ranges=[];
   let uploading=false,busy=false,submitted=0,form;
@@ -50,12 +51,15 @@ function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText=
     getAttribute(name){return name==='aria-disabled'?this.ariaDisabled:null},
     contains(target){return target===this},
     click(){calls.push('send');listeners.get('click')?.({target:this,isTrusted:false});submitCurrent(false)}};
+  const idleVoiceButton={isConnected:true,hidden:false,getClientRects(){return [{}]},
+    getAttribute(name){return name==='aria-label'?'Voice mode':null}};
   const uploadMarker={isConnected:true};
   const stopButton={isConnected:true};
   form={
     matches(selector){return uploading&&selector.includes('[data-state="uploading"]')},
     querySelector(selector){
       if(selector==='button[data-testid="send-button"]')return sendButton;
+      if(idleVoice && (selector.includes('voice-mode-button') || selector.includes('chatdesk-idle-control'))) return idleVoiceButton;
       if(uploading&&selector.includes('upload'))return uploadMarker;
       return null;
     },
@@ -110,6 +114,15 @@ function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText=
   return {adapter:context.ChatDeskAdapter,location,inputs:fileInputs,composer,document,listeners,calls,messages,copiedTypes,
     sendButton,userMessages,assistantMessages,alerts,attachmentNodes,get submitted(){return submitted},
     setUploading(value){uploading=value},setBusy(value){busy=value},
+    setReplyState({actions='visible',text='Completed reply'}={}) {
+      const actionNodes=actions==='none'?[]:[{isConnected:true,hidden:actions==='hidden',getClientRects(){return actions==='hidden'?[]:[{}]},getAttribute(){return null}}];
+      const assistantTurn={isConnected:true,innerText:text,textContent:text,
+        querySelectorAll(){return actionNodes},compareDocumentPosition(){return 0}};
+      const userTurn={isConnected:true,innerText:'First batch',textContent:'First batch',
+        querySelectorAll(){return []},compareDocumentPosition(){return 4}};
+      userMessages.push({innerText:'First batch',closest(){return userTurn}});
+      assistantMessages.push({innerText:text,closest(){return assistantTurn}});
+    },
     trustedEnter(){listeners.get('keydown')?.({isTrusted:true,isComposing:false,key:'Enter',shiftKey:false,
       altKey:false,ctrlKey:false,metaKey:false,target:composer});submitCurrent(true)}};
 }
@@ -184,6 +197,33 @@ test('A wrong Super Upload token cannot append or submit',()=>{
   assert.equal(e.adapter.submitSuperUpload({token:'wrong',expectedDraft:'keep'}).ok,false);
   assert.equal(e.submitted,0);
 });
+test('A manually sent first batch blocks a stale progress append while preparing',()=>{
+  const e=environment({draft:''}); e.adapter.beginSuperUpload({token:'super',types:files});
+  e.userMessages.push({innerText:'First batch sent by user'});
+  const result=e.adapter.appendSuperUploadMessage({token:'super',text:'Batch 1 of 148',automatic:false});
+  assert.equal(result.ok,false); assert.equal(e.composer.value,'');
+});
+test('Only the exact app-added suffix is removed on end, preserving user edits',()=>{
+  const e=environment({draft:'User instruction'}); e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'Batch 1 of 148',automatic:false});
+  e.composer.value='Edited instruction\n\nBatch 1 of 148';
+  assert.equal(e.adapter.endSuperUpload({token:'super'}).ok,true);
+  assert.equal(e.composer.value,'Edited instruction');
+});
+test('Ending after a route change does not clear a new-chat draft',()=>{
+  const e=environment({draft:''}); e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'Batch 1 of 148',automatic:false});
+  e.location.href='https://chatgpt.com/c/new';
+  e.composer.value='New chat draft';
+  assert.equal(e.adapter.endSuperUpload({token:'super'}).ok,true);
+  assert.equal(e.composer.value,'New chat draft');
+});
+test('A configured batch accepts at most one progress append',()=>{
+  const e=environment({draft:''}); e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['a.pdf']});
+  assert.equal(e.adapter.appendSuperUploadMessage({token:'super',text:'Batch 1',automatic:false}).ok,true);
+  assert.equal(e.adapter.appendSuperUploadMessage({token:'super',text:'Batch 1 again',automatic:false}).ok,false);
+});
 test('The first Super Upload batch cannot be sent programmatically',()=>{
   const e=environment();e.adapter.beginSuperUpload({token:'super',types:files});
   const prepared=e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
@@ -244,10 +284,51 @@ test('Super Upload survives virtualized message counts that stay constant',()=>{
   assert.equal(state.assistantMessages,1);
   assert.equal(state.assistantResponseObserved,true);
 });
+test('Completed background response accepts hidden actions with an idle control',()=>{
+  const e=environment({draft:'',idleVoice:true});e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'hidden'});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.assistantResponseObserved,true);assert.equal(state.assistantResponseComplete,true);
+});
+test('Hidden response actions without an idle control are not completion evidence',()=>{
+  const e=environment({draft:'',idleVoice:false});e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'hidden'});
+  assert.equal(e.adapter.superUploadState({token:'super'}).assistantResponseComplete,false);
+});
+test('A busy response is never complete even with hidden actions and idle control',()=>{
+  const e=environment({draft:'',idleVoice:true});e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'hidden'});e.setBusy(true);
+  assert.equal(e.adapter.superUploadState({token:'super'}).assistantResponseComplete,false);
+});
 test('An automatic Super Upload batch refuses to overwrite a nonempty composer',()=>{
   const e=environment();e.adapter.beginSuperUpload({token:'super',types:files});
   assert.equal(e.adapter.appendSuperUploadMessage({token:'super',text:'Next batch',automatic:true}).ok,false);
   assert.equal(e.composer.value,'keep');
+});
+test('Authorised automatic first batch preserves an existing draft',()=>{
+  const e=environment({draft:'Analyse these files'});
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['a.pdf']});
+  const prepared=e.adapter.appendSuperUploadMessage({token:'super',text:'Files 1–10 of 25.',automatic:true,authorizeFirstSend:true});
+  assert.equal(prepared.ok,true);
+  assert.equal(prepared.draft,'Analyse these files\n\nFiles 1–10 of 25.');
+  assert.equal(e.adapter.submitSuperUpload({token:'super',expectedDraft:prepared.draft}).ok,true);
+});
+test('First-send authorisation cannot be reused for a later automatic batch',()=>{
+  const e=environment({draft:''});e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['a.pdf']});
+  const first=e.adapter.appendSuperUploadMessage({token:'super',text:'First',automatic:true,authorizeFirstSend:true});
+  assert.equal(first.ok,true);e.adapter.submitSuperUpload({token:'super',expectedDraft:first.draft});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['b.pdf']});
+  e.composer.value='User changed this draft';
+  assert.equal(e.adapter.appendSuperUploadMessage({token:'super',text:'Second',automatic:true,authorizeFirstSend:true}).ok,false);
+  assert.equal(e.composer.value,'User changed this draft');
 });
 test('An automatic Super Upload batch sends only its exact prepared message',()=>{
   const e=environment({draft:''});e.adapter.beginSuperUpload({token:'super',types:files});
@@ -345,6 +426,86 @@ test('Observed user-turn file button exposes the exact filename as its accessibl
   const state=e.adapter.superUploadState({token:'super'});
   assert.equal(sentCard.querySelectorAll('button')[0].getAttribute('aria-label'),'report(1).pdf');
   assert.equal(state.submittedAttachmentsMatch,true);
+});
+test('Observed Swedish image preview label is accepted as sent attachment evidence',()=>{
+  const name='fixture-gif.gif',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
+  const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?`Öppna bild 1 av 3: ${name}`:null},closest(){return null}};
+  const userTurn={matches(selector){return selector.includes('article')},querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files}); e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]}); e.attachmentNodes.push(composerCard); e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,true);
+});
+test('Observed English image preview label is accepted but mismatched filename is rejected',()=>{
+  const name='fixture-gif.gif',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
+  const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?`Open image 1 of 3: other.gif`:null},closest(){return null}};
+  const userTurn={matches(selector){return selector.includes('article')},querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files}); e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]}); e.attachmentNodes.push(composerCard); e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,false);
+});
+test('Observed Swedish single-image label accepts a numeric filename alias',()=>{
+  const name='fixture-png.png',display='fixture-png(2).png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name:display}],observedFileMarkup:true}).attachmentNodes[0];
+  const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?`Öppna bild: ${display}`:null},closest(){return null}};
+  const userTurn={matches(selector){return selector.includes('article')},querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files}); e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]}); e.attachmentNodes.push(composerCard); e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,true);
+});
+test('Observed English single-image label rejects a mismatched numeric filename alias',()=>{
+  const name='fixture-png.png',display='fixture-png(2).png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name:display}],observedFileMarkup:true}).attachmentNodes[0];
+  const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?'Open image: other(2).png':null},closest(){return null}};
+  const userTurn={matches(selector){return selector.includes('article')},querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files}); e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]}); e.attachmentNodes.push(composerCard); e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,false);
+});
+function canvasPreviewEnvironment({canvasVisible=true,title='Fixture Csv(2)',names=['fixture-csv.csv']}={}){
+  const e=environment({draft:'',attachments:[],observedFileMarkup:true});
+  const displayNames=names.map((name,index)=>name.replace(/\.csv$/i,`(${index+2}).csv`));
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:names});
+  e.attachmentNodes.push(...environment({attachments:displayNames.map(name=>({name})),observedFileMarkup:true}).attachmentNodes);
+  e.adapter.superUploadState({token:'super'});
+  const controls=[1,2].map(()=>({isConnected:true,hidden:false,getClientRects(){return [{}]},getAttribute(){return 'Expand'}}));
+  const grid={isConnected:true,hidden:false,getClientRects(){return []},parentElement:null,
+    closest(selector){return selector==='canvas'?canvas:null}};
+  const canvas={isConnected:true,hidden:false,parentElement:null,contains(node){return node===grid},
+    getClientRects(){return canvasVisible?[{}]:[]},getAttribute(key){return key==='aria-label'?title:null},
+    querySelectorAll(selector){return selector.includes('grid')?[grid]:selector.includes('button')?controls:[]}};
+  grid.parentElement=canvas;
+  const userTurn={isConnected:true,hidden:false,matches(selector){return selector.includes('article')},
+    querySelectorAll(selector){return selector.includes('grid')?[grid]:selector.includes('button')?controls:[]},
+    closest(){return null}};
+  const userMessage={innerText:'First batch',isConnected:true,closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
+  e.userMessages.push(userMessage);
+  return {e,grid,canvas};
+}
+test('Hidden semantic canvas grid with a visible canvas confirms the exact CSV alias',()=>{
+  const {e}=canvasPreviewEnvironment();
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,true);
+});
+test('A semantic grid inside a hidden canvas is not sent-file evidence',()=>{
+  const {e}=canvasPreviewEnvironment({canvasVisible:false});
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,false);
+});
+test('A canvas preview with the wrong or ambiguous title is not sent-file evidence',()=>{
+  const wrong=canvasPreviewEnvironment({title:'Other Csv(2)'});
+  assert.equal(wrong.e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,false);
+  const ambiguous=canvasPreviewEnvironment({names:['fixture-csv.csv','fixture_csv.csv'],title:'Fixture Csv(2)'});
+  assert.equal(ambiguous.e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,false);
 });
 test('Observed numeric suffix aliases are ambiguous when two cards compete for one expected file',()=>{
   const e=environment({draft:'',attachments:[],observedFileMarkup:true});
