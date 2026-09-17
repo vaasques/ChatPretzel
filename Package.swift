@@ -12,7 +12,8 @@ targets += [
     .target(name: "ChatDeskMac", dependencies: ["ChatDeskCore"],
             resources: [.copy("Resources")],
             linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("WebKit"),
-                             .linkedFramework("Carbon"), .linkedFramework("UniformTypeIdentifiers")]),
+                             .linkedFramework("Carbon"), .linkedFramework("UniformTypeIdentifiers"),
+                             .linkedFramework("NaturalLanguage")]),
     .executableTarget(name: "ChatDeskApp", dependencies: ["ChatDeskMac"]),
     .testTarget(name: "ChatDeskMacTests", dependencies: ["ChatDeskMac", "ChatDeskCore"])
 ]

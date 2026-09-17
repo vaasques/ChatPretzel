@@ -13,11 +13,13 @@ extension MainWindowController {
         var counts: [String: Int] = [:]
         for record in attachments.records { counts[record.state.rawValue, default: 0] += 1 }
         let report: [String: Any] = [
-            "app": "ChatPretzel", "version": "0.2.0-local", "os": ProcessInfo.processInfo.operatingSystemVersionString,
+            "app": "ChatPretzel", "version": "0.3.0-local", "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "buildID": Bundle.main.object(forInfoDictionaryKey: "ChatDeskBuildID") as? String ?? "source-development",
             "architecture": architecture, "safeMode": effectiveSafeMode, "fixtureMode": fixtureMode,
             "assistedPaste": preferences.assistedPaste, "attachmentStates": counts,
-            "transferInProgress": attachments.isBusy, "liveCompatibility": "NOT AUTOMATICALLY VERIFIED",
+            "transferInProgress": attachments.isBusy || superUpload.isActive,
+            "superUploadActive": superUpload.isActive,
+            "liveCompatibility": "NOT AUTOMATICALLY VERIFIED",
             "totalRAMAndCPU": "NOT MEASURED BY THIS EXPORT; use the documented Instruments procedure",
             "source": "User-initiated, content-free diagnostic export"
         ]

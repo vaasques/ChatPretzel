@@ -20,7 +20,10 @@ final class WebAdapter {
             completion(.failure(AdapterError.disallowedPage)); return
         }
         let allowed = ["context", "prepareFiles", "triggerFiles", "validateFiles", "cancelFiles",
-                       "getDraft", "insertText", "applyReading", "teardown"]
+                       "beginSuperUpload", "configureSuperUploadBatch", "removeFailedSuperUploadFiles",
+                       "appendSuperUploadMessage", "superUploadState",
+                       "submitSuperUpload", "endSuperUpload", "getDraft", "insertText",
+                       "applyReading", "teardown"]
         guard allowed.contains(method) else { completion(.failure(AdapterError.disallowedPage)); return }
         webView.callAsyncJavaScript(
             "if (!globalThis.ChatDeskAdapter) return {ok:false,error:'The adapter is missing from the page'}; return globalThis.ChatDeskAdapter[method](args);",

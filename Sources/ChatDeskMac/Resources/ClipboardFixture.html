@@ -18,7 +18,8 @@ code{font-size:12px;word-break:break-all}.ok{font-weight:650}.banner{padding:14p
 <form id="fixture-form">
 <label for="prompt-textarea">Test composer – existing text must remain</label>
 <textarea id="prompt-textarea" data-chatdesk-fixture-composer placeholder="For example, type KEEP THIS TEXT before pasting the files."></textarea>
-<div><input type="file" id="fixture-files" multiple aria-label="Choose test files"><button type="button" id="reset">Clear Received Files</button><button type="button" id="report">Save Local Test Report</button></div>
+<div id="fixture-attachments"></div>
+<div><input type="file" id="fixture-files" multiple aria-label="Choose test files"><button type="submit" data-testid="send-button">Send Test Batch</button><button type="button" data-chatdesk-idle-control hidden>Idle response control</button><button type="button" id="reset">Clear Received Files</button><button type="button" id="report">Save Local Test Report</button></div>
 </form>
 <p id="summary" role="status">0 files received.</p>
 <table><thead><tr><th>File</th><th>Bytes</th><th>Local Check</th></tr></thead><tbody id="results"></tbody></table>
@@ -58,7 +59,14 @@ const EXPECTED = [
   }
 ]
 ;
-window.fixtureReport = {scope:'local-browser-file-bytes-only', files:[], operations:0, submitted:0, pending:0};
+window.fixtureReport = {scope:'local-browser-file-bytes-only', files:[], operations:0, submitted:0, assistantReplies:0, pending:0, sentNames:[], sentMessages:[]};
+window.fixtureSubmitDelayMs = 0;
+window.fixtureReplyDelayMs = 0;
+window.fixtureVirtualizeMessages = false;
+window.fixtureRejectedNames = [];
+window.fixtureDropSubmission = false;
+window.fixtureStreamDelayMs = 0;
+window.fixtureRenameUploads = true;
 const rows = document.getElementById('results'), summary = document.getElementById('summary');
 let epoch = 0;
 function render() {
@@ -77,19 +85,29 @@ async function receive(files, source) {
   const captured=Array.from(files), currentEpoch=epoch;
   window.fixtureReport.operations++;
   window.fixtureReport.pending+=captured.length;
+  document.getElementById('fixture-form').setAttribute('data-state','uploading');
   render();
   for (const file of captured) {
+    const displayName=window.fixtureRenameUploads?file.name.replace(/(?=\.[^.]+$|$)/,'(1)'):file.name;
+    const card=document.createElement('div');card.dataset.fixtureName=file.name;card.setAttribute('aria-label',displayName);
+    const label=document.createElement('button');label.type='button';label.setAttribute('aria-label',displayName);label.textContent=displayName;card.append(label);
+    const remove=document.createElement('button');remove.type='button';remove.setAttribute('aria-label',`Ta bort fil ${captured.indexOf(file)+1}: ${displayName}`);remove.textContent='Remove';remove.onclick=()=>card.remove();card.append(remove);
+    document.getElementById('fixture-attachments').append(card);
     let digest=null,error=null;
     try {
       if(file.size>8*1024*1024) throw new Error('Fixture limit: 8 MiB per file; the app\'s URL handoff does not have this limit');
       if(!crypto.subtle) throw new Error('Web Crypto is unavailable in this test environment');
       digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');
+      if(window.fixtureRejectedNames.includes(file.name)) throw new Error('File type not supported');
     } catch(e){error=String(e.message||e);}
     if(currentEpoch!==epoch) return;
     const expected=EXPECTED.find(e=>e.name.normalize('NFC')===file.name.normalize('NFC'));
     const matchesExpected=expected&&digest!==null ? expected.sha256===digest&&expected.size===file.size : null;
     window.fixtureReport.files.push({name:file.name,size:file.size,type:file.type,sha256:digest,matchesExpected,error,source});
-    window.fixtureReport.pending--;render();
+    if(error){card.dataset.state='error';const warning=document.createElement('span');warning.setAttribute('role','alert');warning.textContent=error;card.append(warning);}
+    window.fixtureReport.pending--;
+    if(!window.fixtureReport.pending) document.getElementById('fixture-form').removeAttribute('data-state');
+    render();
   }
 }
 document.getElementById('fixture-files').addEventListener('change',event=>{
@@ -103,8 +121,43 @@ editor.addEventListener('dragover',event=>event.preventDefault());
 editor.addEventListener('drop',event=>{
   if(event.dataTransfer?.files?.length){event.preventDefault();receive(event.dataTransfer.files,'browser-drop-files');}
 });
-document.getElementById('fixture-form').addEventListener('submit',event=>{event.preventDefault();window.fixtureReport.submitted++;render();});
-document.getElementById('reset').addEventListener('click',()=>{epoch++;window.fixtureReport={scope:'local-browser-file-bytes-only',files:[],operations:0,submitted:0,pending:0};render();});
+editor.addEventListener('keydown',event=>{
+  if(event.key==='Enter'&&!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey){
+    event.preventDefault();document.getElementById('fixture-form').requestSubmit();
+  }
+});
+document.getElementById('fixture-form').addEventListener('submit',event=>{
+  event.preventDefault();
+  const text=editor.value;
+  editor.value='';
+  if(window.fixtureDropSubmission)return;
+  const cards=Array.from(document.getElementById('fixture-attachments').children);
+  document.getElementById('fixture-attachments').replaceChildren();
+  const commit=()=>{
+    window.fixtureReport.sentNames.push(...cards.map(card=>card.dataset.fixtureName));
+    window.fixtureReport.sentMessages.push(text);
+    if(window.fixtureVirtualizeMessages)document.querySelector('[data-message-author-role="user"]')?.remove();
+    if(text){const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-user-${window.fixtureReport.submitted}`;const message=document.createElement('div');message.dataset.messageAuthorRole='user';message.innerText=text;turn.append(message,...cards);for(const card of cards)card.querySelector('button[aria-label^="Ta bort fil"]')?.remove();document.body.append(turn);}
+    window.fixtureReport.submitted++;render();
+    const reply=()=>{
+      document.querySelector('[data-testid="stop-button"]')?.remove();
+      if(window.fixtureVirtualizeMessages)document.querySelector('[data-message-author-role="assistant"]')?.remove();
+      const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-assistant-${window.fixtureReport.assistantReplies}`;
+      const message=document.createElement('div');message.dataset.messageAuthorRole='assistant';message.innerText='Partial response';turn.append(message);document.body.append(turn);
+      const complete=()=>{message.innerText=`Local fixture reply ${window.fixtureReport.assistantReplies+1}`;const copy=document.createElement('button');copy.dataset.testid='copy-turn-action-button';copy.textContent='Copy';turn.append(copy);window.fixtureReport.assistantReplies++;render();};
+      const streamDelay=Math.max(0,Math.min(5000,Number(window.fixtureStreamDelayMs)||0));
+      if(streamDelay)setTimeout(complete,streamDelay);else complete();
+    };
+    const replyDelay=Math.max(0,Math.min(5000,Number(window.fixtureReplyDelayMs)||0));
+    if(replyDelay){
+      const stop=document.createElement('button');stop.dataset.testid='stop-button';stop.textContent='Stop response';document.body.append(stop);
+      setTimeout(reply,replyDelay);
+    } else reply();
+  };
+  const delay=Math.max(0,Math.min(5000,Number(window.fixtureSubmitDelayMs)||0));
+  if(delay) setTimeout(commit,delay); else commit();
+});
+document.getElementById('reset').addEventListener('click',()=>{epoch++;window.fixtureReport={scope:'local-browser-file-bytes-only',files:[],operations:0,submitted:0,assistantReplies:0,pending:0};render();});
 document.getElementById('report').addEventListener('click',()=>{
   const blob=new Blob([JSON.stringify(window.fixtureReport,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob);
   const a=document.createElement('a');a.href=url;a.download='ChatPretzel-local-file-report.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);

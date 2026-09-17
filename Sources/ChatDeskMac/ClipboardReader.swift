@@ -73,14 +73,12 @@ private struct EmbeddedAttachment {
 private enum MailAttachmentMaterializerError: LocalizedError {
     case busy
     case invalidRichText
-    case invalidCount
     case unsupportedAttachment
 
     var errorDescription: String? {
         switch self {
         case .busy: return "Another Mail attachment paste is still being prepared. Please wait and try again."
         case .invalidRichText: return "The copied Mail content could not be read. No attachment was sent."
-        case .invalidCount: return "Paste between 1 and 100 Mail attachments at a time. No attachment was sent."
         case .unsupportedAttachment: return "Mail included an attachment that was not a regular file. No partial selection was sent."
         }
     }
@@ -111,7 +109,6 @@ private func embeddedAttachments(in data: Data) throws -> [EmbeddedAttachment] {
         attachments.append(EmbeddedAttachment(suggestedName: name, data: bytes))
     }
     guard rejected == 0 else { throw MailAttachmentMaterializerError.unsupportedAttachment }
-    guard attachments.count <= 100 else { throw MailAttachmentMaterializerError.invalidCount }
     return attachments
 }
 

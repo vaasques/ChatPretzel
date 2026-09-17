@@ -5,8 +5,10 @@ import ChatDeskCore
 final class TransferPanel: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     let coordinator: AttachmentCoordinator
     let table = NSTableView()
-    init(coordinator: AttachmentCoordinator) {
+    private let onCancel: () -> Void
+    init(coordinator: AttachmentCoordinator, onCancel: @escaping () -> Void = {}) {
         self.coordinator = coordinator
+        self.onCancel = onCancel
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 850, height: 390),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         panel.title = "Attachments • Local Status"; panel.isReleasedWhenClosed = false
@@ -16,7 +18,7 @@ final class TransferPanel: NSWindowController, NSTableViewDataSource, NSTableVie
         }
         table.dataSource = self; table.delegate = self; table.allowsMultipleSelection = true; table.rowHeight = 28
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
-        let info = NSTextField(wrappingLabelWithString: "Handed to WebKit does not mean fully uploaded. Confirm only files you have checked in ChatGPT yourself. Cancel stops only files that have not yet been handed over.")
+        let info = NSTextField(wrappingLabelWithString: "Handed to WebKit does not mean fully uploaded. Confirmation is optional status housekeeping and is never required for Super Upload. Cancel Pending stops later Super Upload batches, but messages already submitted to ChatGPT cannot be withdrawn.")
         let buttons = NSStackView(views: [button("Cancel Pending", #selector(cancel)), button("Confirm Selected", #selector(confirm)), button("Clear Completed History", #selector(clear))])
         buttons.spacing = 10
         installPanelContent(panel, views: [info, scroll, buttons], flexible: scroll)
@@ -36,7 +38,7 @@ final class TransferPanel: NSWindowController, NSTableViewDataSource, NSTableVie
     }
     func refresh() { table.reloadData() }
     private func button(_ title: String, _ action: Selector) -> NSButton { NSButton(title: title, target: self, action: action) }
-    @objc private func cancel() { coordinator.cancel(); refresh() }
+    @objc private func cancel() { onCancel(); refresh() }
     @objc private func clear() { coordinator.clearResolved(); refresh() }
     @objc private func confirm() {
         let ids = Set(table.selectedRowIndexes.compactMap { coordinator.records.indices.contains($0) ? coordinator.records[$0].id : nil })

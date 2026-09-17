@@ -22,7 +22,7 @@ final class SettingsPanel: NSWindowController {
         shortcut.selectItem(at: preferences.hotKeyUsesCommand ? 1 : 0)
         width.addItems(withTitles: ["Website default reading width", "880 px", "1040 px", "1280 px"])
         width.selectItem(at: [0, 880, 1040, 1280].firstIndex(of: preferences.readingWidth) ?? 0)
-        let info = NSTextField(wrappingLabelWithString: "Changes reload the page. Existing web attachments may need to be selected again. Your account and local library are not deleted. With attachment assistance off, WebKit uses normal paste with no automatic fallback.")
+        let info = NSTextField(wrappingLabelWithString: "Changes reload the page. Existing web attachments may need to be selected again. Your account and local library are not deleted. With attachment assistance off, WebKit uses normal paste and Super Upload is disabled.")
         info.textColor = .secondaryLabelColor
         let button = NSButton(title: "Save and Reload…", target: self, action: #selector(apply))
         installPanelContent(panel, views: [safe, paste, cv, hotKey, shortcut, width, info, button], flexible: info)

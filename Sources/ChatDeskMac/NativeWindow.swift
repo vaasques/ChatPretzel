@@ -5,7 +5,12 @@ import ChatDeskCore
 final class ChatWindow: NSWindow {
     var interceptFilePaste: (() -> Bool)?
     var mapControlCV: (() -> Bool)?
+    var interactionLocked: (() -> Bool)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if interactionLocked?() == true {
+            NSSound.beep()
+            return true
+        }
         let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         let key = event.charactersIgnoringModifiers?.lowercased()
         if flags == [.command], key == "v", interceptFilePaste?() == true { return true }

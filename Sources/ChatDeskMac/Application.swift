@@ -91,13 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.helpMenu = help; NSApp.mainMenu = bar
     }
     @objc private func about() {
-        let alert = NSAlert(); alert.messageText = "ChatPretzel 0.2.0"
-        alert.informativeText = "Built with Swift, AppKit, and the WebKit engine included with macOS. No Electron and no separate AI subscription inside the app. Microphone access is requested only when you start voice input in ChatGPT; camera access remains blocked.\n\nChatPretzel is an independent, unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI. Sign in with your ChatGPT password rather than a passkey."
+        let alert = NSAlert(); alert.messageText = "ChatPretzel 0.3.0"
+        alert.informativeText = "Built with Swift, AppKit, and the WebKit engine included with macOS. No Electron and no separate AI subscription inside the app. Super Upload splits clipboard selections larger than 10 files into batches; you press Enter once for the first batch and the remaining batches are sent automatically. Microphone access is requested only when you start voice input in ChatGPT; camera access remains blocked.\n\nChatPretzel is an independent, unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI. Sign in with your ChatGPT password rather than a passkey."
         alert.runModal()
     }
     @objc private func testStatus() {
         let alert = NSAlert(); alert.messageText = "Important attachment test"
-        alert.informativeText = "Select PDF, DOCX, XLSX, PNG, JPG, and TXT files in Finder. Press Command+C, focus ChatGPT's message field, and press Command+V once. You can also copy attachments in Mail and paste them into the message field. The files should become real attachments without sending the prompt.\n\nThe local test receiver can verify file bytes with SHA-256. It does not prove that ChatGPT's server accepted an upload. Login and live service behavior are tested separately."
+        alert.informativeText = "For up to 10 files, copy PDF, DOCX, XLSX, PNG, JPG, or TXT files in Finder, focus ChatGPT's message field, and press Command+V. You can also paste copied Apple Mail attachments. The files are prepared without sending your prompt.\n\nFor more than 10 copied files, Super Upload prepares the first batch and adds a progress note below any existing instruction. Press Enter once. Later batches are sent automatically after ChatGPT finishes each response. After the first send, a frosted progress screen locks the main window against accidental chat changes. Use its Cancel button to stop remaining batches and unlock the window.\n\nThe local test receiver can verify file bytes with SHA-256. It does not prove that ChatGPT's server accepted an upload. Login and live service behavior are tested separately."
         alert.runModal()
     }
     @objc private func fixture() {

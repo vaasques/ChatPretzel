@@ -136,6 +136,59 @@ final class FileSelectionTests: XCTestCase {
     }
 }
 
+final class SuperUploadPlanTests: XCTestCase {
+    func testTwentyFiveFilesBecomeTenTenFive() throws {
+        let plan = try XCTUnwrap(SuperUploadPlan(totalFiles: 25))
+        XCTAssertEqual(plan.batches.map(\.count), [10, 10, 5])
+        XCTAssertEqual(plan.batches.map(\.sentAfterBatch), [10, 20, 25])
+        XCTAssertEqual(plan.batches.map(\.remainingAfterBatch), [15, 5, 0])
+    }
+
+    func testElevenFilesBecomeTenAndOne() throws {
+        let plan = try XCTUnwrap(SuperUploadPlan(totalFiles: 11))
+        XCTAssertEqual(plan.batches.map(\.count), [10, 1])
+        XCTAssertEqual(plan.batches.last?.isLast, true)
+    }
+
+    func testLargeQueuesHaveNoTwentyFiveOrHundredFileAppLimit() throws {
+        let plan = try XCTUnwrap(SuperUploadPlan(totalFiles: 1_001))
+        XCTAssertEqual(plan.batches.count, 101)
+        XCTAssertEqual(plan.batches.first?.count, 10)
+        XCTAssertEqual(plan.batches.last?.count, 1)
+        XCTAssertEqual(plan.batches.last?.sentAfterBatch, 1_001)
+    }
+
+    func testEnglishProgressMessagesDescribeTheWholeQueue() throws {
+        let plan = try XCTUnwrap(SuperUploadPlan(totalFiles: 25))
+        let first = SuperUploadMessageBuilder.message(for: plan.batches[0], language: .english,
+                                                      selectedCount: 25, skipped: [])
+        let middle = SuperUploadMessageBuilder.message(for: plan.batches[1], language: .english,
+                                                       selectedCount: 25, skipped: [])
+        let last = SuperUploadMessageBuilder.message(for: plan.batches[2], language: .english,
+                                                     selectedCount: 25, skipped: [])
+        XCTAssertTrue(first.contains("files 1–10 of 25")); XCTAssertTrue(first.contains("15 more files"))
+        XCTAssertTrue(middle.contains("20 of 25 files")); XCTAssertTrue(middle.contains("5 more"))
+        XCTAssertTrue(last.contains("files 21–25 of 25")); XCTAssertTrue(last.contains("All 25"))
+    }
+
+    func testSkippedFilesAreReportedOnlyInFirstMessage() throws {
+        let plan = try XCTUnwrap(SuperUploadPlan(totalFiles: 11))
+        let skipped = ["bad.exe — file type not supported"]
+        let first = SuperUploadMessageBuilder.message(for: plan.batches[0], language: .english,
+                                                      selectedCount: 12, skipped: skipped)
+        let last = SuperUploadMessageBuilder.message(for: plan.batches[1], language: .english,
+                                                     selectedCount: 12, skipped: skipped)
+        XCTAssertTrue(first.contains("bad.exe")); XCTAssertFalse(last.contains("bad.exe"))
+    }
+
+    func testSwedishMessageUsesTheSameCounters() throws {
+        let plan = try XCTUnwrap(SuperUploadPlan(totalFiles: 25))
+        let middle = SuperUploadMessageBuilder.message(for: plan.batches[1], language: .swedish,
+                                                       selectedCount: 25, skipped: [])
+        XCTAssertTrue(middle.contains("11–20 av 25")); XCTAssertTrue(middle.contains("20 av 25"))
+    }
+}
+
 final class LocalStoreTests: XCTestCase {
     var directory: URL!
     override func setUpWithError() throws {

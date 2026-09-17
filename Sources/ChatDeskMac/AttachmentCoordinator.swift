@@ -2,6 +2,11 @@ import AppKit
 import WebKit
 import ChatDeskCore
 
+struct AttachmentBatchFailure: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 @MainActor
 final class AttachmentCoordinator {
     struct Pending {
@@ -14,6 +19,8 @@ final class AttachmentCoordinator {
     private var preparingID: UUID?
     private var pending: Pending?
     private var timeout: DispatchWorkItem?
+    private var batchCompletionOperationID: UUID?
+    private var batchCompletion: ((Result<Int, AttachmentBatchFailure>) -> Void)?
     private var retainedLeases: [UUID: [FileAccessLease]] = [:]
     private let io = DispatchQueue(label: "ChatDesk.file-validation", qos: .userInitiated)
     var onChange: (() -> Void)?
@@ -27,17 +34,22 @@ final class AttachmentCoordinator {
 
     /// Source is a native gesture. Paths/URLs are never supplied by JavaScript.
     @discardableResult
-    func start(_ selection: FileSelection, requireFocus: Bool) -> Bool {
-        guard !isBusy else { onNotice?("A file operation is in progress. Wait for it to finish or cancel it first."); return false }
-        guard !selection.urls.isEmpty, selection.urls.count <= 100 else {
-            onNotice?("Choose 1–100 files per local operation. The service's own limits also apply."); return false
+    func start(_ selection: FileSelection, requireFocus: Bool, superUploadToken: String? = nil,
+               completion: ((Result<Int, AttachmentBatchFailure>) -> Void)? = nil) -> Bool {
+        func reject(_ message: String) -> Bool {
+            onNotice?(message); completion?(.failure(AttachmentBatchFailure(message: message))); return false
         }
-        guard records.count + selection.urls.count <= 500 else {
-            onNotice?("The local attachment history is full (500 rows). Clear completed history in the attachment panel; no new files were sent."); return false
+        guard !isBusy else { return reject("A file operation is in progress. Wait for it to finish or cancel it first.") }
+        guard !selection.urls.isEmpty, selection.urls.count <= 100 else {
+            return reject("Choose 1–100 files per batch. Super Upload automatically divides larger clipboard selections into batches of 10.")
+        }
+        guard superUploadToken != nil || records.count + selection.urls.count <= 500 else {
+            return reject("The local attachment history is full (500 rows). Clear completed history in the attachment panel; no new files were sent.")
         }
         guard retainedLeases.count < 8 else {
-            onNotice?("Check earlier attachments and confirm them in the attachment panel before sending more."); return false
+            return reject("Check earlier attachments and confirm them in the attachment panel before sending more.")
         }
+        batchCompletionOperationID = selection.id; batchCompletion = completion
         if selection.rejectedRepresentations > 0 {
             addRecords(selection)
             fail(selection.id, "The entire selection could not be read (\(selection.rejectedRepresentations) file references). No partial selection was sent. Choose the original files again.")
@@ -64,8 +76,10 @@ final class AttachmentCoordinator {
                 }
                 let permit = UploadPermit(page: identity)
                 let descriptors = valid.files.map { ["extension": $0.url.pathExtension, "mime": $0.mime] }
-                self.adapter.call("prepareFiles", arguments: ["token": permit.token.uuidString,
-                                  "files": descriptors, "requireFocus": requireFocus]) { [weak self] result in
+                var arguments: [String: Any] = ["token": permit.token.uuidString,
+                    "files": descriptors, "requireFocus": requireFocus]
+                if let superUploadToken { arguments["superUploadToken"] = superUploadToken }
+                self.adapter.call("prepareFiles", arguments: arguments) { [weak self] result in
                     guard let self, self.preparingID == selection.id else { return }
                     guard case .success(let info) = result, info["ok"] as? Bool == true,
                           self.identity(info, generation: currentGeneration) == identity,
@@ -114,13 +128,14 @@ final class AttachmentCoordinator {
             do { try current.permit.consume(page: identity, mainFrame: frame.isMainFrame) }
             catch { completion(nil); self.fail(p.selectionID, "The file operation is stale or belongs to another page."); return }
             self.timeout?.cancel(); self.timeout = nil; self.pending = nil
-            self.retainedLeases[current.selectionID] = current.files.map(\.lease)
+            self.retainedLeases[current.selectionID, default: []].append(contentsOf: current.files.map(\.lease))
             // Only original URL objects cross this native callback. WebKit reads the bytes.
             completion(current.files.map(\.url))
             current.recordIDs.forEach { self.set($0, .handedToWebKit) }
             self.adapter.call("cancelFiles") { _ in }
             self.onNotice?("\(current.files.count) original files handed to WebKit. Check the upload in ChatGPT; this is not server confirmation.")
             self.onChange?()
+            self.finishBatch(current.selectionID, result: .success(current.files.count))
         }
         return true
     }
@@ -173,7 +188,9 @@ final class AttachmentCoordinator {
         onChange?()
     }
     private func applyValidation(selection: FileSelection, results: [Result<CheckedFile, Error>]) -> (files: [CheckedFile], ids: [UUID]) {
-        let indices = records.indices.filter { records[$0].operationID == selection.id }
+        let indices = records.indices.filter {
+            records[$0].operationID == selection.id && records[$0].state == .checking
+        }
         var files: [CheckedFile] = []; var ids: [UUID] = []
         for (index, result) in zip(indices, results) {
             switch result {
@@ -209,6 +226,7 @@ final class AttachmentCoordinator {
         onReleaseOperation?(operation)
         adapter.call("cancelFiles") { _ in }
         onNotice?(message); onChange?()
+        finishBatch(operation, result: .failure(AttachmentBatchFailure(message: message)))
     }
     func cancel(reason: String = "Cancelled by the user.") {
         let activeOperations = Set(records.filter {
@@ -221,7 +239,49 @@ final class AttachmentCoordinator {
             }
         }
         activeOperations.forEach { retainedLeases.removeValue(forKey: $0); onReleaseOperation?($0) }
+        let activeBatch = batchCompletionOperationID
         adapter.call("cancelFiles") { _ in }; onChange?()
+        if let activeBatch { finishBatch(activeBatch, result: .failure(AttachmentBatchFailure(message: reason))) }
+    }
+
+    func recordSkipped(operationID: UUID, filename: String, detail: String) {
+        var record = AttachmentRecord(operationID: operationID, filename: filename)
+        record.transition(to: .checking); record.transition(to: .failed, detail: detail)
+        records.append(record); onChange?()
+    }
+
+    func cancelSuperUpload(operationID: UUID, reason: String) {
+        timeout?.cancel(); timeout = nil
+        if preparingID == operationID { preparingID = nil }
+        if pending?.selectionID == operationID { pending = nil }
+        for index in records.indices where records[index].operationID == operationID {
+            if [.identified, .checking, .waitingForWebKit].contains(records[index].state) {
+                records[index].transition(to: .cancelled, detail: reason)
+            }
+        }
+        retainedLeases.removeValue(forKey: operationID)
+        onReleaseOperation?(operationID)
+        adapter.call("cancelFiles") { _ in }
+        finishBatch(operationID, result: .failure(AttachmentBatchFailure(message: reason)))
+        onChange?()
+    }
+
+    /// Once a submitted batch has received a reply, only the remaining Mail staging files
+    /// need to stay available. Dropping these grants keeps a long queue lightweight.
+    func releaseSuperUploadBatch(operationID: UUID) {
+        retainedLeases.removeValue(forKey: operationID)
+    }
+
+    func completeSuperUpload(operationID: UUID) {
+        retainedLeases.removeValue(forKey: operationID)
+        onReleaseOperation?(operationID)
+    }
+
+    private func finishBatch(_ operationID: UUID, result: Result<Int, AttachmentBatchFailure>) {
+        guard batchCompletionOperationID == operationID else { return }
+        let callback = batchCompletion
+        batchCompletionOperationID = nil; batchCompletion = nil
+        callback?(result)
     }
     func navigationChanged() {
         let handedOperations = Set(retainedLeases.keys)

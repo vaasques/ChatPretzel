@@ -12,6 +12,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     private(set) var webView: NativeWebView!
     private(set) var adapter: WebAdapter!
     private(set) var attachments: AttachmentCoordinator!
+    private(set) var superUpload: SuperUploadCoordinator!
     private var observations: [NSKeyValueObservation] = []
     private var authenticationWindows: [UUID: AuthenticationWindow] = [:]
     private var transfersPanel: TransferPanel?
@@ -20,6 +21,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     private var settingsPanel: SettingsPanel?
     private let mailAttachments = MailAttachmentMaterializer()
     private let webContainer = NSView()
+    private let superUploadOverlay = SuperUploadOverlayView(frame: .zero)
     private let status = NSTextField(labelWithString: "Development build • native Mac build and ChatGPT compatibility require testing")
     private let locationLabel = NSTextField(labelWithString: "chatgpt.com")
     private let progress = NSProgressIndicator()
@@ -34,6 +36,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     let policy: NavigationPolicy
     var onPreferencesChanged: (() -> Void)?
     var effectiveSafeMode: Bool { forcedSafeMode || preferences.safeMode }
+    var isSuperUploadInteractionLocked: Bool { !superUploadOverlay.isHidden }
+    var superUploadProgressText: String { superUploadOverlay.statusText }
 
     init(preferences: Preferences, fixture: Bool, safeMode: Bool,
          libraryDirectory: URL? = nil, websiteDataStore: WKWebsiteDataStore? = nil) {
@@ -46,6 +50,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         window.title = "ChatPretzel"; window.minSize = NSSize(width: 720, height: 480); window.isReleasedWhenClosed = false
         super.init(window: window); window.delegate = self
         makeLayout()
+        superUploadOverlay.onCancel = { [weak self] in self?.superUpload?.cancel() }
+        window.interactionLocked = { [weak self] in self?.isSuperUploadInteractionLocked == true }
         window.setFrameAutosaveName("ChatDesk.Main")
         if !NSScreen.screens.contains(where: { $0.visibleFrame.intersection(window.frame).width > 120 && $0.visibleFrame.intersection(window.frame).height > 80 }) { window.center() }
         window.interceptFilePaste = { [weak self] in self?.handleFilePaste() ?? false }
@@ -87,14 +93,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         let stack = NSStackView(views: [bar, searchRow, progress, webContainer, footer]); stack.orientation = .vertical; stack.spacing = 0; stack.alignment = .leading
         stack.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView(); window.contentView = root; root.addSubview(stack)
+        superUploadOverlay.translatesAutoresizingMaskIntoConstraints = false
+        superUploadOverlay.isHidden = true
+        root.addSubview(superUploadOverlay, positioned: .above, relativeTo: stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: root.leadingAnchor), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: root.topAnchor), stack.bottomAnchor.constraint(equalTo: root.bottomAnchor)])
+            stack.topAnchor.constraint(equalTo: root.topAnchor), stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            superUploadOverlay.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            superUploadOverlay.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            superUploadOverlay.topAnchor.constraint(equalTo: root.topAnchor),
+            superUploadOverlay.bottomAnchor.constraint(equalTo: root.bottomAnchor)])
         for view in [bar, searchRow, progress, webContainer, footer] { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         webContainer.setContentHuggingPriority(.defaultLow, for: .vertical)
         webContainer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
     }
     private func makeWebView(restoringURL: URL? = nil) {
         observations.removeAll()
+        superUpload?.cancel(reason: "Super Upload stopped because the web view was replaced.")
+        superUpload = nil
         attachments?.cancel(); transfersPanel?.close(); transfersPanel = nil
         if let old = webView { old.stopLoading(); old.uiDelegate = nil; old.navigationDelegate = nil; old.removeFromSuperview() }
         let configuration = WKWebViewConfiguration()
@@ -118,11 +133,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         attachments.onNotice = { [weak self] in self?.notice($0) }
         attachments.onChange = { [weak self] in self?.transfersPanel?.refresh() }
         attachments.onReleaseOperation = { [weak self] in self?.mailAttachments.release($0) }
+        superUpload = SuperUploadCoordinator(adapter: adapter, attachments: attachments)
+        superUpload.onNotice = { [weak self] in self?.notice($0) }
+        superUpload.onProgress = { [weak self] in self?.updateSuperUploadLock($0) }
         webView.mayHandleDrop = { [weak self] in
-            guard let self else { return false }; return !self.effectiveSafeMode && self.preferences.assistedPaste && self.policy.allowsAdapter(self.webView.url)
+            guard let self else { return false }
+            return !self.isSuperUploadInteractionLocked && !self.effectiveSafeMode
+                && self.preferences.assistedPaste && self.policy.allowsAdapter(self.webView.url)
         }
         webView.onFileDrop = { [weak self] selection in
-            self?.attachments.start(selection, requireFocus: false); self?.showTransfersIfFailedRepresentations(selection); return true
+            guard let self else { return false }
+            guard !self.superUpload.isActive else {
+                self.notice("Super Upload is already running. The dropped files were not added to its queue.")
+                return true
+            }
+            self.attachments.start(selection, requireFocus: false)
+            self.showTransfersIfFailedRepresentations(selection)
+            return true
         }
         webView.onUnsupportedDrop = { [weak self] in self?.notice($0) }
         observations.append(webView.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
@@ -143,9 +170,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
     }
     private func urlChanged() {
-        guard observedURL != webView.url else { return }
-        observedURL = webView.url; navigationGeneration &+= 1; knownDocumentID = nil
-        attachments.navigationChanged()
+        let priorURL = observedURL
+        guard priorURL != webView.url else { return }
+        let keepSuperUpload = superUpload?.allowsURLChange(from: priorURL, to: webView.url) == true
+        observedURL = webView.url
+        if !keepSuperUpload {
+            navigationGeneration &+= 1; knownDocumentID = nil
+            superUpload?.cancel(reason: "Super Upload stopped because the page or conversation changed.")
+            attachments.navigationChanged()
+        }
         locationLabel.stringValue = policy.isFixture(webView.url) ? "Local file test – no upload" : (webView.url?.host ?? "")
         if !policy.isChat(webView.url) { drafts.removeAll() }
         updateAdapterContext()
@@ -161,10 +194,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
     }
     func notice(_ message: String) { status.stringValue = message; status.toolTip = message }
+    private func updateSuperUploadLock(_ progress: SuperUploadProgress?) {
+        guard let progress else {
+            superUploadOverlay.isHidden = true
+            window?.standardWindowButton(.closeButton)?.isEnabled = true
+            window?.standardWindowButton(.miniaturizeButton)?.isEnabled = true
+            window?.standardWindowButton(.zoomButton)?.isEnabled = true
+            if window?.isKeyWindow == true { window?.makeFirstResponder(webView) }
+            return
+        }
+        superUploadOverlay.update(processed: progress.processedFiles, total: progress.totalFiles)
+        superUploadOverlay.isHidden = false
+        window?.standardWindowButton(.closeButton)?.isEnabled = false
+        window?.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+        window?.standardWindowButton(.zoomButton)?.isEnabled = false
+        window?.makeFirstResponder(superUploadOverlay)
+    }
+    @discardableResult
+    private func blockInteractionWhileUploading() -> Bool {
+        guard isSuperUploadInteractionLocked else { return false }
+        NSSound.beep()
+        return true
+    }
     func showAndFocus() {
         NSApp.activate(ignoringOtherApps: true); window?.makeKeyAndOrderFront(nil)
     }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { sender.orderOut(nil); return false }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if blockInteractionWhileUploading() { return false }
+        sender.orderOut(nil); return false
+    }
     func prepareToQuit() -> Bool {
         if libraryPanel?.allowLeave() == false { return false }
         if !library.finishWrites() {
@@ -173,6 +231,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Quit Anyway")
             guard alert.runModal() == .alertSecondButtonReturn else { return false }
         }
+        superUpload?.cancel(reason: "Super Upload stopped because ChatPretzel is quitting.")
         attachments.cancel(); downloads.cancelAll(); mailAttachments.cleanupAll()
         for auth in authenticationWindows.values { auth.onClose = nil; auth.close() }
         authenticationWindows.removeAll(); webView.stopLoading(); return true
@@ -183,8 +242,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     }
     func handleFilePaste() -> Bool {
         guard webHasFocus, !effectiveSafeMode, preferences.assistedPaste, policy.allowsAdapter(webView.url) else { return false }
+        guard !superUpload.isActive else {
+            notice("Super Upload is already running. This paste was not added to the active queue.")
+            return true
+        }
         switch ClipboardReader.read(.general) {
-        case .files(let selection): attachments.start(selection, requireFocus: true); showTransfersIfFailedRepresentations(selection); return true
+        case .files(let selection):
+            if !superUpload.start(selection) {
+                attachments.start(selection, requireFocus: true)
+                showTransfersIfFailedRepresentations(selection)
+            }
+            return true
         case .mailRichText(let data, let changeCount):
             let expectedGeneration = navigationGeneration
             let expectedURL = webView.url
@@ -208,7 +276,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
                         self.notice("The page changed while Mail was preparing the attachments. No files were sent.")
                         return
                     }
-                    if !self.attachments.start(selection, requireFocus: true) {
+                    if self.superUpload.start(selection) {
+                        if !self.superUpload.isActive { self.mailAttachments.release(selection.id) }
+                    } else if !self.attachments.start(selection, requireFocus: true) {
                         self.mailAttachments.release(selection.id)
                     }
                 }
@@ -222,21 +292,39 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         if selection.rejectedRepresentations > 0 { showTransfers() }
     }
     func pasteFromMenu() {
+        if blockInteractionWhileUploading() { return }
         if !handleFilePaste() { _ = NSApp.sendAction(Selector(("paste:")), to: nil, from: self) }
     }
-    @objc func back() { webView.goBack() }
-    @objc func forward() { webView.goForward() }
-    @objc func newChat() { fixtureMode = false; webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!)) }
+    @objc func back() {
+        if blockInteractionWhileUploading() { return }
+        superUpload.cancel(reason: "Super Upload stopped because you went back."); webView.goBack()
+    }
+    @objc func forward() {
+        if blockInteractionWhileUploading() { return }
+        superUpload.cancel(reason: "Super Upload stopped because you went forward."); webView.goForward()
+    }
+    @objc func newChat() {
+        if blockInteractionWhileUploading() { return }
+        superUpload.cancel(reason: "Super Upload stopped because a new chat was opened.")
+        fixtureMode = false; webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
+    }
     @objc func reload() {
+        if blockInteractionWhileUploading() { return }
         guard let window else { return }
         let alert = NSAlert(); alert.messageText = "Reload the page?"; alert.informativeText = "Unsent text and web attachments may be lost. Nothing is sent again automatically."
         alert.addButton(withTitle: "Reload"); alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] response in if response == .alertFirstButtonReturn { self?.webView.reload() } }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            self.superUpload.cancel(reason: "Super Upload stopped because the page was reloaded.")
+            self.webView.reload()
+        }
     }
     @objc func chooseFiles() {
+        if blockInteractionWhileUploading() { return }
         guard policy.allowsAdapter(webView.url), let window, window.attachedSheet == nil,
               let page = webView.url else { notice("Open ChatGPT's message field first."); return }
         if effectiveSafeMode { notice("Use the website's own attachment button in Safe Mode."); return }
+        if superUpload.isActive { notice("Wait for Super Upload to finish or cancel it in Attachment Status."); return }
         let expected = navigationGeneration
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false; panel.canChooseFiles = true
         panel.title = "Choose Original Files"
@@ -247,7 +335,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
     }
     @objc func showTransfers() {
-        if transfersPanel == nil { transfersPanel = TransferPanel(coordinator: attachments); transfersPanel?.window?.center() }
+        if transfersPanel == nil {
+            transfersPanel = TransferPanel(coordinator: attachments) { [weak self] in
+                if self?.superUpload.isActive == true { self?.superUpload.cancel() }
+                else { self?.attachments.cancel() }
+            }
+            transfersPanel?.window?.center()
+        }
         transfersPanel?.refresh(); transfersPanel?.showWindow(nil); transfersPanel?.window?.makeKeyAndOrderFront(nil)
     }
     @objc func showDownloads() {
@@ -255,14 +349,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         downloadsPanel?.refresh(); downloadsPanel?.showWindow(nil); downloadsPanel?.window?.makeKeyAndOrderFront(nil)
     }
     @objc func showLibrary() {
+        if blockInteractionWhileUploading() { return }
         if libraryPanel == nil {
             libraryPanel = LibraryPanel(model: library); libraryPanel?.window?.center()
             libraryPanel?.onInsert = { [weak self] in self?.insertPrompt($0) }
-            libraryPanel?.onOpen = { [weak self] url in self?.showAndFocus(); self?.webView.load(URLRequest(url: url)) }
+            libraryPanel?.onOpen = { [weak self] url in
+                self?.superUpload.cancel(reason: "Super Upload stopped because another chat was opened.")
+                self?.showAndFocus(); self?.webView.load(URLRequest(url: url))
+            }
         }
         libraryPanel?.showWindow(nil); libraryPanel?.window?.makeKeyAndOrderFront(nil)
     }
     @objc func showSettings() {
+        if blockInteractionWhileUploading() { return }
         settingsPanel = SettingsPanel(preferences: preferences)
         settingsPanel?.onApply = { [weak self] in
             guard let self else { return }
@@ -271,7 +370,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
         settingsPanel?.window?.center(); settingsPanel?.showWindow(nil)
     }
-    @objc func showSearch() { searchRow.isHidden = false; window?.makeFirstResponder(search) }
+    @objc func showSearch() {
+        if blockInteractionWhileUploading() { return }
+        searchRow.isHidden = false; window?.makeFirstResponder(search)
+    }
     @objc private func hideSearch() { searchRow.isHidden = true; window?.makeFirstResponder(webView) }
     @objc private func findNext() {
         guard !search.stringValue.isEmpty else { return }
@@ -283,14 +385,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     func changeZoom(_ delta: Double) { preferences.zoom += delta; webView.pageZoom = preferences.zoom }
     func resetZoom() { preferences.zoom = 1; webView.pageZoom = 1 }
     func openFixture() {
+        if blockInteractionWhileUploading() { return }
         guard let url = policy.fixtureURL else { notice("The local test file is missing."); return }
+        superUpload.cancel(reason: "Super Upload stopped because the local test receiver was opened.")
         fixtureMode = true; webView.loadFileURL(url, allowingReadAccessTo: url)
     }
     func addBookmark() {
+        if blockInteractionWhileUploading() { return }
         guard let url = webView.url, policy.isChat(url) else { notice("Only ChatGPT links can be saved here."); return }
         showLibrary(); libraryPanel?.add(LibraryEntry(kind: .bookmark, title: "Return to Chat", url: url.absoluteString))
     }
     func saveCurrentDraft() {
+        if blockInteractionWhileUploading() { return }
         guard !effectiveSafeMode else { notice("Draft reading is disabled in Safe Mode."); return }
         adapter.call("getDraft") { [weak self] result in
             guard let self, case .success(let info) = result, info["temporary"] as? Bool == false,
@@ -302,6 +408,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
     }
     func restoreSessionDraft() {
+        if blockInteractionWhileUploading() { return }
         guard let href = webView.url?.absoluteString, let draft = drafts.draft(for: href), let window else {
             notice("There is no session draft for this address. Drafts from another account or a previous app session are never restored automatically."); return
         }
@@ -317,6 +424,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         }
     }
     private func insertPrompt(_ text: String) {
+        if blockInteractionWhileUploading() { return }
         guard !effectiveSafeMode else { notice("Prompt insertion is disabled in Safe Mode. Copy from the library instead."); return }
         var values: [String: String] = [:]
         for key in PromptTemplate.variables(in: text) {
@@ -335,9 +443,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     // MARK: WebKit delegates
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         updateAdapterContext()
-        notice(effectiveSafeMode ? "Safe Mode • basic website without adapter" : (policy.isFixture(webView.url) ? "Local file test • not live ChatGPT verification" : "Page loaded • ChatPretzel 0.2.0"))
+        notice(effectiveSafeMode ? "Safe Mode • basic website without adapter" : (policy.isFixture(webView.url) ? "Local file test • not live ChatGPT verification" : "Page loaded • ChatPretzel 0.3.0"))
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        superUpload.cancel(reason: "Super Upload stopped because the page began a full navigation.")
         navigationGeneration &+= 1; knownDocumentID = nil; attachments.navigationChanged()
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -347,11 +456,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
         notice("Loading stopped (error \((error as NSError).code)). Reload manually if needed.")
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        superUpload.cancel(reason: "Super Upload stopped because WebKit's web process ended.")
         attachments.navigationChanged(); notice("WebKit's web process ended. A text draft may remain in session memory. Nothing reloads or sends automatically.")
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         let url = navigationAction.request.url
+        if isSuperUploadInteractionLocked, navigationAction.navigationType == .linkActivated {
+            decisionHandler(.cancel)
+            return
+        }
         if let frame = navigationAction.targetFrame, !frame.isMainFrame {
             decisionHandler(url?.scheme == "https" || url?.absoluteString == "about:blank" ? .allow : .cancel); return
         }
@@ -390,6 +504,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if isSuperUploadInteractionLocked { return nil }
         let url = navigationAction.request.url
         if policy.isAuthentication(url) || (url?.absoluteString == "about:blank" && policy.isAuthentication(webView.url)) {
             guard authenticationWindows.count < 2 else { notice("Too many sign-in windows are open."); return nil }
@@ -430,9 +545,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
             decisionHandler(.deny)
             return
         }
-        // Let WebKit and macOS display and remember the normal microphone permission prompt.
-        // ChatPretzel never starts recording on its own; this callback follows a website request.
-        decisionHandler(.prompt)
+        // Authorize the trusted ChatGPT main frame at the website layer. Returning
+        // .prompt asks again on subsequent captures; it does not persist consent.
+        // macOS still enforces the app's microphone permission independently.
+        // This callback only authorizes capture requested by the website.
+        decisionHandler(.grant)
     }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard !effectiveSafeMode, message.webView === webView, message.frameInfo.isMainFrame,
@@ -440,6 +557,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
               let parsed = AdapterMessage.parse(message.body) else { return }
         switch parsed {
         case .privacyBoundary:
+            superUpload.cancel(reason: "Super Upload stopped at an account or workspace boundary.")
             drafts.removeAll(); navigationGeneration &+= 1; attachments.navigationChanged()
         case .draft(let href, let doc, let text, let temporary):
             guard href == webView.url?.absoluteString, doc == knownDocumentID else { return }
