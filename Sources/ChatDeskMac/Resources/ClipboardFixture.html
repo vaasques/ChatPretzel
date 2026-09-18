@@ -67,6 +67,29 @@ window.fixtureRejectedNames = [];
 window.fixtureDropSubmission = false;
 window.fixtureStreamDelayMs = 0;
 window.fixtureRenameUploads = true;
+// Fixture-only switch for the current ChatGPT layout where completed replies
+// can be visible before their action controls are attached to the same turn.
+window.fixtureOmitResponseActions = false;
+// Fixture-only reproduction of a long sent user message that ChatGPT collapses
+// behind a localized “Visa mer” control. The full text stays in DOM but is not
+// part of the rendered innerText, matching the confirmation edge case.
+window.fixtureCollapseSentMessage = false;
+// Fixture-only reproduction of role text nested in an article while the
+// gallery remains on the outer conversation-turn.
+window.fixtureNestedUserArticle = false;
+// Fixture-only reproduction of an image gallery whose control has a generic
+// label and whose exact filename exists only in a child image alt attribute.
+window.fixtureImageAltOnly = false;
+// Fixture-only current-layout transitions: ChatGPT can temporarily retain an
+// older role node while the newest completed answer is represented by its turn
+// action, and it can rebuild a sent user turn without the inner role attribute.
+window.fixtureOmitSentUserRole = false;
+window.fixtureOmitAssistantRole = false;
+window.fixtureAddOlderAssistantRole = () => {
+  const turn=document.createElement('article');turn.dataset.testid='conversation-turn-assistant-seed';
+  const message=document.createElement('div');message.dataset.messageAuthorRole='assistant';
+  message.innerText='Older fixture answer';turn.append(message);document.body.append(turn);
+};
 const rows = document.getElementById('results'), summary = document.getElementById('summary');
 let epoch = 0;
 function render() {
@@ -90,7 +113,7 @@ async function receive(files, source) {
   for (const file of captured) {
     const renameSuffix=String(window.fixtureRenameSuffix||'1').replace(/[^0-9]/g,'')||'1';
     const displayName=window.fixtureRenameUploads?file.name.replace(/(?=\.[^.]+$|$)/,`(${renameSuffix})`):file.name;
-    const card=document.createElement('div');card.dataset.fixtureName=file.name;card.setAttribute('aria-label',displayName);
+    const card=document.createElement('div');card.dataset.fixtureName=file.name;card.dataset.testid='file-attachment';card.setAttribute('aria-label',displayName);
     const label=document.createElement('button');label.type='button';label.setAttribute('aria-label',displayName);label.textContent=displayName;card.append(label);
     const remove=document.createElement('button');remove.type='button';remove.setAttribute('aria-label',`Ta bort fil ${captured.indexOf(file)+1}: ${displayName}`);remove.textContent='Remove';remove.onclick=()=>card.remove();card.append(remove);
     document.getElementById('fixture-attachments').append(card);
@@ -129,6 +152,7 @@ editor.addEventListener('keydown',event=>{
 });
 document.getElementById('fixture-form').addEventListener('submit',event=>{
   event.preventDefault();
+  document.querySelector('[data-chatdesk-idle-control]')?.setAttribute('hidden','');
   const text=editor.value;
   editor.value='';
   if(window.fixtureDropSubmission)return;
@@ -138,8 +162,13 @@ document.getElementById('fixture-form').addEventListener('submit',event=>{
     window.fixtureReport.sentNames.push(...cards.map(card=>card.dataset.fixtureName));
     window.fixtureReport.sentMessages.push(text);
     if(window.fixtureVirtualizeMessages)document.querySelector('[data-message-author-role="user"]')?.remove();
-    if(text){const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-user-${window.fixtureReport.submitted}`;const message=document.createElement('div');message.dataset.messageAuthorRole='user';message.innerText=text;turn.append(message,...cards);for(const card of cards){
+    if(text){const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-user-${window.fixtureReport.submitted}`;const message=document.createElement('div');if(!window.fixtureOmitSentUserRole)message.dataset.messageAuthorRole='user';if(window.fixtureCollapseSentMessage){const full=document.createElement('span');full.textContent=text;full.style.display='none';const more=document.createElement('button');more.type='button';more.textContent='Visa mer';message.append(full,more);}else message.innerText=text;const messageParent=window.fixtureNestedUserArticle?document.createElement('article'):turn;messageParent.append(message);if(messageParent!==turn)turn.append(messageParent);turn.append(...cards);for(const card of cards){
       card.querySelector('button[aria-label^="Ta bort fil"]')?.remove();
+      if(window.fixtureImageAltOnly){
+        const label=card.querySelector('button');
+        const filename=label?.getAttribute('aria-label')||card.getAttribute('aria-label')||'';
+        if(label&&filename){label.setAttribute('aria-label','Open image');label.textContent='Open image';const image=document.createElement('img');image.alt=filename;label.append(image);}
+      }
       if(window.fixtureTablePreviews){
         const title=card.querySelector('button')?.textContent.replace(/\.csv$/i,'').replace(/_/g,' ');
         card.removeAttribute('aria-label');card.replaceChildren();
@@ -179,8 +208,8 @@ document.getElementById('fixture-form').addEventListener('submit',event=>{
       document.querySelector('[data-testid="stop-button"]')?.remove();
       if(window.fixtureVirtualizeMessages)document.querySelector('[data-message-author-role="assistant"]')?.remove();
       const turn=document.createElement('article');turn.dataset.testid=`conversation-turn-assistant-${window.fixtureReport.assistantReplies}`;
-      const message=document.createElement('div');message.dataset.messageAuthorRole='assistant';message.innerText='Partial response';turn.append(message);document.body.append(turn);
-      const complete=()=>{message.innerText=`Local fixture reply ${window.fixtureReport.assistantReplies+1}`;const copy=document.createElement('button');copy.dataset.testid='copy-turn-action-button';copy.textContent='Copy';turn.append(copy);window.fixtureReport.assistantReplies++;render();};
+      const message=document.createElement('div');if(!window.fixtureOmitAssistantRole)message.dataset.messageAuthorRole='assistant';message.innerText='Partial response';turn.append(message);document.body.append(turn);
+      const complete=()=>{message.innerText=`Local fixture reply ${window.fixtureReport.assistantReplies+1}`;if(!window.fixtureOmitResponseActions){const copy=document.createElement('button');copy.dataset.testid='copy-turn-action-button';copy.textContent='Copy';turn.append(copy);}document.querySelector('[data-chatdesk-idle-control]')?.removeAttribute('hidden');window.fixtureReport.assistantReplies++;render();};
       const streamDelay=Math.max(0,Math.min(5000,Number(window.fixtureStreamDelayMs)||0));
       if(streamDelay)setTimeout(complete,streamDelay);else complete();
     };

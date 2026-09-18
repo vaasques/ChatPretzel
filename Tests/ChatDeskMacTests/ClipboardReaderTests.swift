@@ -36,6 +36,18 @@ final class ClipboardReaderTests: XCTestCase {
         XCTAssertEqual(selection.urls.count, 2)
     }
 
+    func testLargeTypedFileListPreservesOrder() {
+        let board = makePasteboard(); defer { board.releaseGlobally() }
+        let urls = (0..<3_000).map { URL(fileURLWithPath: "/fixture/large-\($0).png") }
+        XCTAssertTrue(board.writeObjects(urls.map { $0 as NSURL }))
+
+        guard case .files(let selection) = ClipboardReader.read(board) else {
+            XCTFail("Expected large typed file selection")
+            return
+        }
+        XCTAssertEqual(selection.urls, urls)
+    }
+
     func testMailRTFDAttachmentIsMaterializedWithoutUsingItsTextPreview() async throws {
         let board = makePasteboard(); defer { board.releaseGlobally() }
         let expected = Data("Mail attachment bytes".utf8)

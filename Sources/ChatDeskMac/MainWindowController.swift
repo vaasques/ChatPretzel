@@ -206,7 +206,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
             if window?.isKeyWindow == true { window?.makeFirstResponder(webView) }
             return
         }
-        superUploadOverlay.update(processed: progress.processedFiles, total: progress.totalFiles)
+        superUploadOverlay.update(stage: progress.stage,
+                                  processed: progress.processedFiles,
+                                  total: progress.totalFiles)
         superUploadOverlay.isHidden = false
         window?.standardWindowButton(.closeButton)?.isEnabled = false
         window?.standardWindowButton(.miniaturizeButton)?.isEnabled = true
@@ -505,7 +507,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKUIDele
     // MARK: WebKit delegates
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         updateAdapterContext()
-        notice(effectiveSafeMode ? "Safe Mode • basic website without adapter" : (policy.isFixture(webView.url) ? "Local file test • not live ChatGPT verification" : "Page loaded • ChatPretzel 0.3.0"))
+        notice(effectiveSafeMode ? "Safe Mode • basic website without adapter" : (policy.isFixture(webView.url) ? "Local file test • not live ChatGPT verification" : "Page loaded • \(AppMetadata.versionedName)"))
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         superUpload.cancel(reason: "Super Upload stopped because the page began a full navigation.")

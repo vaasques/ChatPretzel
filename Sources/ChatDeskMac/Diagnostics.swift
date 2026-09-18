@@ -13,7 +13,7 @@ extension MainWindowController {
         var counts: [String: Int] = [:]
         for record in attachments.records { counts[record.state.rawValue, default: 0] += 1 }
         let report: [String: Any] = [
-            "app": "ChatPretzel", "version": "0.3.0-local", "os": ProcessInfo.processInfo.operatingSystemVersionString,
+            "app": AppMetadata.name, "version": AppMetadata.version, "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "buildID": Bundle.main.object(forInfoDictionaryKey: "ChatDeskBuildID") as? String ?? "source-development",
             "architecture": architecture, "safeMode": effectiveSafeMode, "fixtureMode": fixtureMode,
             "assistedPaste": preferences.assistedPaste, "attachmentStates": counts,

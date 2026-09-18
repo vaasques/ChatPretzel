@@ -2,6 +2,34 @@ import XCTest
 @testable import ChatDeskMac
 
 final class SuperUploadStagingTests: XCTestCase {
+    func testPlanningDuplicateNamesDoesNotCreateCopiesUntilTheirBatchIsMaterialized() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("staging-lazy-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let first = root.appendingPathComponent("report.pdf")
+        let other = root.appendingPathComponent("other")
+        try fm.createDirectory(at: other, withIntermediateDirectories: true)
+        let second = other.appendingPathComponent("report.pdf")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+
+        let staging = try SuperUploadFileStaging(operationID: UUID())
+        let planned = staging.plan([first, second])
+        XCTAssertEqual(planned.map(\.uploadName), ["report.pdf", "report 2.pdf"])
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: staging.directory.path), [])
+
+        let firstResult = try XCTUnwrap(staging.materialize([planned[0]]).first)
+        XCTAssertEqual(try firstResult.get(), first)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: staging.directory.path), [])
+
+        let secondResult = try XCTUnwrap(staging.materialize([planned[1]]).first)
+        let stagedDuplicate = try secondResult.get()
+        XCTAssertEqual(stagedDuplicate.lastPathComponent, "report 2.pdf")
+        XCTAssertTrue(fm.fileExists(atPath: stagedDuplicate.path))
+        XCTAssertEqual(try Data(contentsOf: second), Data("second".utf8))
+    }
+
     func testDuplicateNamesAreCopiedWithoutChangingOriginals() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("staging-test-\(UUID().uuidString)")

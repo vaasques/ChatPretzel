@@ -22,6 +22,10 @@ final class AttachmentCoordinator {
     private var batchCompletionOperationID: UUID?
     private var batchCompletion: ((Result<Int, AttachmentBatchFailure>) -> Void)?
     private var retainedLeases: [UUID: [FileAccessLease]] = [:]
+    /// Super Upload keeps a compact recent handoff history rather than one table
+    /// row per file for an unbounded queue. The page itself remains the source of
+    /// truth for completed attachments; native rows are only local handoff state.
+    private let maximumRetainedSuperUploadRows = 40
     private let io = DispatchQueue(label: "ChatDesk.file-validation", qos: .userInitiated)
     var onChange: (() -> Void)?
     var onNotice: ((String) -> Void)?
@@ -266,15 +270,30 @@ final class AttachmentCoordinator {
         onChange?()
     }
 
-    /// Once a submitted batch has received a reply, only the remaining Mail staging files
-    /// need to stay available. Dropping these grants keeps a long queue lightweight.
+    /// Once a submitted batch has received a reply, only a compact local history
+    /// and the next batch's grants need to stay available. This avoids growing the
+    /// attachment-panel table to thousands of rows during a large Super Upload.
     func releaseSuperUploadBatch(operationID: UUID) {
         retainedLeases.removeValue(forKey: operationID)
+        trimSuperUploadHistory(operationID: operationID)
     }
 
     func completeSuperUpload(operationID: UUID) {
         retainedLeases.removeValue(forKey: operationID)
+        trimSuperUploadHistory(operationID: operationID)
         onReleaseOperation?(operationID)
+    }
+
+    private func trimSuperUploadHistory(operationID: UUID) {
+        let handedOffIndices = records.indices.filter {
+            records[$0].operationID == operationID && records[$0].state == .handedToWebKit
+        }
+        let excess = handedOffIndices.count - maximumRetainedSuperUploadRows
+        guard excess > 0 else { return }
+        for index in handedOffIndices.prefix(excess).reversed() {
+            records.remove(at: index)
+        }
+        onChange?()
     }
 
     private func finishBatch(_ operationID: UUID, result: Result<Int, AttachmentBatchFailure>) {

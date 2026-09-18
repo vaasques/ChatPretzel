@@ -91,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.helpMenu = help; NSApp.mainMenu = bar
     }
     @objc private func about() {
-        let alert = NSAlert(); alert.messageText = "ChatPretzel 0.3.0"
+        let alert = NSAlert(); alert.messageText = AppMetadata.versionedName
         alert.informativeText = "Built with Swift, AppKit, and the WebKit engine included with macOS. No Electron and no separate AI subscription inside the app. Super Upload splits clipboard selections larger than 10 files into batches; you press Enter once for the first batch and the remaining batches are sent automatically. Microphone access is requested only when you start voice input in ChatGPT; camera access remains blocked.\n\nChatPretzel is an independent, unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI. Sign in with your ChatGPT password rather than a passkey."
         alert.runModal()
     }

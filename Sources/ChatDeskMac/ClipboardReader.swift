@@ -42,12 +42,23 @@ public enum ClipboardReader {
         // Retain native NSURL objects returned by the pasteboard. Do not turn plain path text into grants.
         let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ?? []
         let nativeURLs = objects.compactMap { ($0 as? NSURL).map { $0 as URL } }
+        // A large Finder selection can contain thousands of typed file URLs. Index the native
+        // objects once instead of scanning the whole native array for every pasteboard item.
+        // Keep the first object for a key to preserve the old first(where:) behavior.
+        var nativeURLByStandardizedString: [String: URL] = [:]
+        nativeURLByStandardizedString.reserveCapacity(nativeURLs.count)
+        for nativeURL in nativeURLs {
+            let key = nativeURL.standardizedFileURL.absoluteString
+            if nativeURLByStandardizedString[key] == nil {
+                nativeURLByStandardizedString[key] = nativeURL
+            }
+        }
         var urls: [URL] = []
         var rejected = 0
         for item in items where item.types.contains(.fileURL) {
             guard let representation = item.string(forType: .fileURL),
                   let parsed = FilePolicy.url(fromTypedRepresentation: representation) else { rejected += 1; continue }
-            urls.append(nativeURLs.first(where: { $0.standardizedFileURL == parsed.standardizedFileURL }) ?? parsed)
+            urls.append(nativeURLByStandardizedString[parsed.standardizedFileURL.absoluteString] ?? parsed)
         }
         if !hasTypedFile, hasLegacyFiles,
            let paths = pasteboard.propertyList(forType: legacyType) as? [String] {
@@ -55,7 +66,7 @@ public enum ClipboardReader {
             for path in paths {
                 guard path.hasPrefix("/") else { rejected += 1; continue }
                 let url = URL(fileURLWithPath: path)
-                urls.append(nativeURLs.first(where: { $0.standardizedFileURL == url.standardizedFileURL }) ?? url)
+                urls.append(nativeURLByStandardizedString[url.standardizedFileURL.absoluteString] ?? url)
             }
         }
         guard !urls.isEmpty else {

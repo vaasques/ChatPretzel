@@ -13,8 +13,14 @@ final class SuperUploadOverlayView: NSVisualEffectView {
 
     private(set) var processedFiles = 0
     private(set) var totalFiles = 0
+    private(set) var stage: SuperUploadProgressStage = .uploading
     var statusText: String {
-        "Uploading in progress\n\(processedFiles) out of \(totalFiles) files processed"
+        switch stage {
+        case .checking:
+            return "Checking selected files\n\(processedFiles) out of \(totalFiles) items checked"
+        case .uploading:
+            return "Uploading in progress\n\(processedFiles) out of \(totalFiles) files processed"
+        }
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -68,10 +74,18 @@ final class SuperUploadOverlayView: NSVisualEffectView {
 
     required init?(coder: NSCoder) { nil }
 
-    func update(processed: Int, total: Int) {
+    func update(stage: SuperUploadProgressStage, processed: Int, total: Int) {
+        self.stage = stage
         processedFiles = max(0, min(processed, total))
         totalFiles = max(0, total)
-        progressLabel.stringValue = "\(processedFiles) out of \(totalFiles) files processed"
+        switch stage {
+        case .checking:
+            titleLabel.stringValue = "Checking selected files"
+            progressLabel.stringValue = "\(processedFiles) out of \(totalFiles) items checked"
+        case .uploading:
+            titleLabel.stringValue = "Uploading in progress"
+            progressLabel.stringValue = "\(processedFiles) out of \(totalFiles) files processed"
+        }
         progressBar.maxValue = Double(max(totalFiles, 1))
         progressBar.doubleValue = Double(processedFiles)
         setAccessibilityValue(statusText)

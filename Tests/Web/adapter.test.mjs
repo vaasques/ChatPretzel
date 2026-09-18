@@ -6,9 +6,14 @@ const source=fs.readFileSync(new URL('../../Sources/ChatDeskMac/Resources/Adapte
 function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText='',draft='keep',
                       documentLanguage='en',autoReply=true,attachments=[],observedFileMarkup=false,
                       idleVoice=false}={}) {
-  const listeners=new Map(),calls=[],userMessages=[],assistantMessages=[],alerts=[];
+  const listeners=new Map(),calls=[],userMessages=[],assistantMessages=[],copyActions=[],alerts=[],conversationTurns=[];
   const copiedTypes=new Map(),ranges=[];
-  let uploading=false,busy=false,submitted=0,form;
+  let uploading=false,busy=false,submitted=0,form,turnSerial=0;
+  const orderedTurn=properties=>({isConnected:true,...properties,
+    getAttribute(name){return name==='data-testid'?this.testid:null},
+    closest(selector){return selector.includes('conversation-turn-')||selector==='article'?this:null},
+    compareDocumentPosition(other){return this===other?0:(this.order<other.order?4:2)},
+    order:turnSerial++,testid:`conversation-turn-${turnSerial}`});
   const attachmentNodes=attachments.map(({name,status='',hidden=false}={})=>{
     const removeLabel=observedFileMarkup ? `Ta bort fil 1: ${name}` : 'Remove file';
     const fileButton=observedFileMarkup
@@ -86,6 +91,8 @@ function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText=
       if(selector==='input[type="file"]')return fileInputs;
       if(selector==='[data-message-author-role="user"]')return userMessages;
       if(selector==='[data-message-author-role="assistant"]')return assistantMessages;
+      if(selector==='[data-testid="copy-turn-action-button"]')return copyActions;
+      if(selector==='[data-testid^="conversation-turn-"]')return conversationTurns;
       if(selector==='[role="alert"]')return alerts;
       if(selector.includes('stop-button'))return busy?[stopButton]:[];
       if(!observedFileMarkup && (selector.includes('attachment') || selector.includes('data-file-name') || selector.includes('data-filename')))return attachmentNodes;
@@ -114,14 +121,42 @@ function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText=
   return {adapter:context.ChatDeskAdapter,location,inputs:fileInputs,composer,document,listeners,calls,messages,copiedTypes,
     sendButton,userMessages,assistantMessages,alerts,attachmentNodes,get submitted(){return submitted},
     setUploading(value){uploading=value},setBusy(value){busy=value},
-    setReplyState({actions='visible',text='Completed reply'}={}) {
+    seedAssistantRole(text='Previous answer') {
+      const turn=orderedTurn({innerText:text,textContent:text,querySelector(){return null},querySelectorAll(){return []}});
+      const message={innerText:text,textContent:text,closest(){return turn}};
+      turn.querySelector=selector=>selector==='[data-message-author-role="assistant"]'?message:null;
+      conversationTurns.push(turn);assistantMessages.push(message);return turn;
+    },
+    seedCopyBackedAnswer(text='Previous copy-backed answer') {
+      const turn=orderedTurn({innerText:text,textContent:text,querySelector(){return null},querySelectorAll(){return []}});
+      const action={isConnected:true,closest(){return turn}};
+      conversationTurns.push(turn);copyActions.push(action);return turn;
+    },
+    seedUserTurn(text='First batch',{roleNode=true}={}) {
+      const turn=orderedTurn({innerText:text,textContent:text,querySelector(){return null},querySelectorAll(selector){
+        if(selector.includes('attachment')||selector.includes('data-file-name')||selector.includes('data-filename'))return attachmentNodes;
+        return [];
+      }});
+      const message={innerText:text,textContent:text,closest(){return turn}};
+      if(roleNode){userMessages.push(message);turn.querySelector=selector=>selector==='[data-message-author-role="user"]'?message:null;}
+      conversationTurns.push(turn);return turn;
+    },
+    setReplyState({actions='visible',text='Completed reply',roleNode=true,userRoleNode=true}={}) {
       const actionNodes=actions==='none'?[]:[{isConnected:true,hidden:actions==='hidden',getClientRects(){return actions==='hidden'?[]:[{}]},getAttribute(){return null}}];
-      const assistantTurn={isConnected:true,innerText:text,textContent:text,
-        querySelectorAll(){return actionNodes},compareDocumentPosition(){return 0}};
-      const userTurn={isConnected:true,innerText:'First batch',textContent:'First batch',
-        querySelectorAll(){return []},compareDocumentPosition(){return 4}};
-      userMessages.push({innerText:'First batch',closest(){return userTurn}});
-      assistantMessages.push({innerText:text,closest(){return assistantTurn}});
+      const userTurn=orderedTurn({innerText:'First batch',textContent:'First batch',
+        querySelector(){return null},querySelectorAll(selector){
+          if(selector.includes('attachment')||selector.includes('data-file-name')||selector.includes('data-filename'))return attachmentNodes;
+          return [];
+        }});
+      const userMessage={innerText:'First batch',textContent:'First batch',closest(){return userTurn}};
+      if(userRoleNode){userMessages.push(userMessage);userTurn.querySelector=selector=>selector==='[data-message-author-role="user"]'?userMessage:null;}
+      const assistantTurn=orderedTurn({innerText:text,textContent:text,
+        querySelector(){return null},querySelectorAll(){return actionNodes}});
+      const assistantMessage={innerText:text,textContent:text,closest(){return assistantTurn}};
+      if(roleNode){assistantMessages.push(assistantMessage);assistantTurn.querySelector=selector=>selector==='[data-message-author-role="assistant"]'?assistantMessage:null;}
+      for(const action of actionNodes)action.closest=()=>assistantTurn;
+      if(!roleNode)copyActions.push(...(actionNodes.length?actionNodes:[{isConnected:true,closest(){return assistantTurn}}]));
+      conversationTurns.push(userTurn,assistantTurn);
     },
     trustedEnter(){listeners.get('keydown')?.({isTrusted:true,isComposing:false,key:'Enter',shiftKey:false,
       altKey:false,ctrlKey:false,metaKey:false,target:composer});submitCurrent(true)}};
@@ -264,6 +299,17 @@ test('Super Upload can corroborate a submitted first message after the composer 
   state=e.adapter.superUploadState({token:'super'});
   assert.equal(state.userMessages,1);assert.equal(state.lastUserMatchesExpected,true);
 });
+test('Super Upload confirms a collapsed first message from its full DOM text',()=>{
+  const e=environment({draft:''});e.adapter.beginSuperUpload({token:'super',types:files});
+  const expected='Files 1–10 of 1481 are attached. 1471 more files will follow.';
+  e.adapter.appendSuperUploadMessage({token:'super',text:expected,automatic:false});
+  // Current ChatGPT can render a long user message as a visible excerpt plus a
+  // localized “Visa mer” control while retaining the complete content in DOM.
+  e.userMessages.push({innerText:'Files 1–10 of 1481 are attached. Visa mer',textContent:expected});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.lastUserMatchesExpected,true);
+  assert.equal(state.submittedAttachmentsMatch,true);
+});
 test('Super Upload survives virtualized message counts that stay constant',()=>{
   const e=environment({draft:'',autoReply:false});
   e.userMessages.push({innerText:'Older user turn'});
@@ -291,6 +337,93 @@ test('Completed background response accepts hidden actions with an idle control'
   e.setReplyState({actions:'hidden'});
   const state=e.adapter.superUploadState({token:'super'});
   assert.equal(state.assistantResponseObserved,true);assert.equal(state.assistantResponseComplete,true);
+});
+test('Completed response without action controls accepts the explicit idle composer state',()=>{
+  const e=environment({draft:'',idleVoice:true});e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'none'});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.assistantResponseObserved,true);assert.equal(state.assistantResponseComplete,true);
+  assert.equal(state.assistantResponseActionCount,0);assert.equal(state.responseCompletionEvidence,true);
+});
+test('Copy-action fallback can bind a completed response without an assistant role node',()=>{
+  const e=environment({draft:'',idleVoice:true});e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'none',roleNode:false});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.assistantResponseObserved,true);assert.equal(state.assistantResponseComplete,true);
+  assert.equal(state.assistantTurnFound,true);
+});
+test('A newer copy-backed answer wins over an older retained assistant role node',()=>{
+  const e=environment({draft:'',idleVoice:true});e.seedAssistantRole('Previous answer');
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'none',roleNode:false});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.assistantResponseObserved,true);assert.equal(state.assistantTurnFound,true);
+  assert.equal(state.assistantResponseComplete,true);
+});
+test('A newer assistant role node wins over an older retained copy action',()=>{
+  const e=environment({draft:'',idleVoice:true});e.seedCopyBackedAnswer();
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'none',roleNode:true});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.assistantResponseObserved,true);assert.equal(state.assistantResponseComplete,true);
+});
+test('An old copy-backed answer cannot confirm a new batch without a fresh answer',()=>{
+  const e=environment({draft:'',idleVoice:true});e.seedCopyBackedAnswer();
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[]});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'none',roleNode:false,text:''});
+  // Remove the synthetic fresh fallback action and its empty turn. Only the
+  // answer that existed at beginSuperUpload remains as assistant evidence.
+  e.document.querySelectorAll('[data-testid="copy-turn-action-button"]').splice?.(1);
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.assistantResponseObserved,false);assert.equal(state.assistantResponseComplete,false);
+});
+test('A role-less sent user turn is bound by exact text and exact attachments',()=>{
+  const e=environment({draft:'',idleVoice:true,attachments:[]});
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['a.pdf']});
+  const card={hidden:false,isConnected:true,innerText:'a.pdf',
+    getAttribute(name){return name==='data-file-name'?'a.pdf':null},hasAttribute(){return false},matches(){return false},
+    querySelectorAll(){return []},closest(){return null}};
+  e.attachmentNodes.push(card);
+  assert.equal(e.adapter.superUploadState({token:'super'}).attachmentsReady,true);
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.setReplyState({actions:'none',userRoleNode:false});
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.lastUserTextMatchesExpected,true);assert.equal(state.userMessageChanged,true);
+  assert.equal(state.submittedUserTurnFound,true);assert.equal(state.submittedAttachmentsMatch,true);
+  assert.equal(state.followsSubmittedUser,true);assert.equal(state.assistantResponseComplete,true);
+});
+test('An explicitly assistant-attributed turn cannot impersonate the submitted user batch',()=>{
+  const e=environment({draft:'',attachments:[{name:'a.pdf'}]});
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['a.pdf']});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  const assistantTurn=e.seedAssistantRole('First batch');
+  assistantTurn.querySelectorAll=selector=>(selector.includes('attachment')||selector.includes('data-file-name')||selector.includes('data-filename'))?e.attachmentNodes:[];
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.lastUserTextMatchesExpected,false);assert.equal(state.lastUserMatchesExpected,false);
+  assert.equal(state.submittedAttachmentsMatch,false);
+});
+test('A later different user message cannot make an older matching batch look fresh',()=>{
+  const e=environment({draft:'',attachments:[{name:'a.pdf'}]});
+  e.seedUserTurn('First batch');
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:['a.pdf']});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.seedUserTurn('A different message');
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.lastUserTextMatchesExpected,true);assert.equal(state.userMessageChanged,false);
+  assert.equal(state.lastUserMatchesExpected,false);assert.equal(state.submittedAttachmentsMatch,false);
 });
 test('Hidden response actions without an idle control are not completion evidence',()=>{
   const e=environment({draft:'',idleVoice:false});e.adapter.beginSuperUpload({token:'super',types:files});
@@ -407,6 +540,104 @@ test('Observed localized remove control is matched by its exact aria-label',()=>
   assert.equal(result.ok,true);
   assert.equal(controls[1].removed,true);
 });
+function sentGalleryAliasEnvironment({originals,sentNames}={}) {
+  const expected=originals||Array.from({length:10},(_,index)=>`gallery-${index+1}.png`);
+  const withSuffix=(name,suffix)=>name.replace(/(?=\.[^.]+$)/,`(${suffix})`);
+  const composerNames=expected.map(name=>withSuffix(name,2));
+  const displayed=sentNames||expected.map(name=>withSuffix(name,3));
+  const e=environment({draft:'',attachments:[],observedFileMarkup:true});
+  e.adapter.beginSuperUpload({token:'super',types:files});
+  e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:expected});
+  e.attachmentNodes.push(...environment({attachments:composerNames.map(name=>({name})),observedFileMarkup:true}).attachmentNodes);
+  const composerState=e.adapter.superUploadState({token:'super'});
+  assert.equal(composerState.attachmentsReady,true);
+
+  let gallery;
+  const controls=displayed.map((name,index)=>({isConnected:true,hidden:false,parentElement:null,
+    getAttribute(key){
+      if(key==='aria-label')return `Öppna bild ${index+1} av ${displayed.length}: ${name}`;
+      if(key==='aria-haspopup')return 'dialog';
+      if(key==='tabindex')return '0';
+      return null;
+    },
+    getClientRects(){return [{}]},contains(node){return node?.parentElement===this},
+    closest(){return null},matches(){return false},querySelectorAll(){return []}}));
+  const images=displayed.map((name,index)=>({isConnected:true,hidden:false,parentElement:controls[index],
+    getAttribute(key){return key==='alt'?name:null},getClientRects(){return [{}]},
+    closest(selector){return /button|aria-haspopup|tabindex/.test(selector)?controls[index]:null},
+    matches(){return false},querySelectorAll(){return []}}));
+  gallery={isConnected:true,hidden:false,parentElement:null,innerText:'Bilder',
+    getAttribute(key){return key==='data-testid'?'attachment-gallery':key==='aria-label'?'Bilder':null},
+    getClientRects(){return [{}]},hasAttribute(key){return key==='aria-label'},
+    contains(node){return controls.includes(node)||images.includes(node)},closest(){return null},matches(){return false},
+    querySelectorAll(selector){return selector.includes('img')?images:selector.includes('button')?controls:[]}};
+  controls.forEach(control=>{control.parentElement=gallery});
+  gallery.parentElement=null;
+  const userTurn={isConnected:true,hidden:false,innerText:'First batch',textContent:'First batch',
+    getAttribute(key){return key==='data-testid'?'conversation-turn-live-gallery':null},
+    getClientRects(){return [{}]},matches(selector){return selector.includes('conversation-turn')||selector.includes('article')},
+    contains(node){return node===gallery||gallery.contains(node)},closest(){return null},
+    querySelector(){return null},querySelectorAll(selector){
+      // This deliberately models the live page: the broad attachment selector
+      // sees one generic gallery ancestor, while the actual file evidence is on
+      // ten aria-haspopup image controls nested inside it.
+      if(selector.includes('[data-testid*="attachment"]'))return [gallery];
+      if(selector.includes('img[alt]')||selector.includes('img[title]'))return images;
+      if(selector.includes('button')||selector.includes('[aria-haspopup]')||selector.includes('[tabindex]'))return controls;
+      return [];
+    }};
+  gallery.parentElement=userTurn;
+  const userMessage={isConnected:true,innerText:'First batch',textContent:'First batch',
+    closest(selector){return selector.includes('conversation-turn')||selector==='article'?userTurn:null}};
+  e.userMessages.push(userMessage);
+  return {e,state:e.adapter.superUploadState({token:'super'}),expected,composerNames,displayed};
+}
+test('Live generic image gallery verifies all ten files after ChatGPT changes composer aliases',()=>{
+  const {state}=sentGalleryAliasEnvironment();
+  assert.equal(state.submittedUserTurnFound,true);
+  assert.equal(state.submittedAttachmentCount,10);
+  assert.equal(state.submittedAttachmentMatchedCount,10);
+  assert.equal(state.submittedAttachmentsMatch,true);
+});
+test('Live generic image gallery does not collapse child filename controls into one Bilder wrapper',()=>{
+  const {state}=sentGalleryAliasEnvironment();
+  assert.equal(state.submittedAttachmentCount,10);
+  assert.deepEqual(Array.from(state.unconfirmedFiles),[]);
+});
+test('Live gallery requires every expected file and rejects an unrelated replacement',()=>{
+  const originals=Array.from({length:10},(_,index)=>`required-${index+1}.png`);
+  const sentNames=originals.map(name=>name.replace(/(?=\.[^.]+$)/,'(3)'));
+  sentNames[9]='unrelated(3).png';
+  const {state}=sentGalleryAliasEnvironment({originals,sentNames});
+  assert.equal(state.submittedAttachmentMatchedCount,9);
+  assert.equal(state.submittedAttachmentsMatch,false);
+});
+test('A website collision suffix cannot impersonate a genuine numbered original filename',()=>{
+  const {state}=sentGalleryAliasEnvironment({originals:['report(1).png'],sentNames:['report(2).png']});
+  assert.equal(state.submittedAttachmentMatchedCount,0);
+  assert.equal(state.submittedAttachmentsMatch,false);
+});
+test('A generic focusable filename label with a hidden unrelated image is not sent attachment evidence',()=>{
+  const name='report.png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
+  const unrelatedImage={isConnected:true,hidden:true,getAttribute(key){return key==='alt'?'unrelated-icon.png':null}};
+  const generic={isConnected:true,hidden:false,textContent:'',getClientRects(){return [{}]},
+    getAttribute(key){return key==='aria-label'?name:key==='tabindex'?'0':null},
+    closest(){return null},contains(node){return node===unrelatedImage},matches(){return false},
+    querySelector(selector){return selector.includes('img')?unrelatedImage:null},querySelectorAll(){return []}};
+  const userTurn={isConnected:true,innerText:'First batch',textContent:'First batch',
+    matches(selector){return selector.includes('conversation-turn')||selector.includes('article')},contains(node){return node===generic},
+    querySelector(){return null},querySelectorAll(selector){return selector.includes('[tabindex]')?[generic]:[]},closest(){return null}};
+  const userMessage={isConnected:true,innerText:'First batch',textContent:'First batch',
+    closest(selector){return selector.includes('conversation-turn')||selector==='article'?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files});e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]});e.attachmentNodes.push(composerCard);e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.submittedAttachmentMatchedCount,0);
+  assert.equal(state.submittedAttachmentsMatch,false);
+});
 test('Observed user-turn file button exposes the exact filename as its accessible name',()=>{
   const name='report.pdf',e=environment({draft:'',observedFileMarkup:true});
   const composerCard=environment({attachments:[{name:'report(1).pdf'}],observedFileMarkup:true}).attachmentNodes[0];
@@ -432,6 +663,75 @@ test('Observed Swedish image preview label is accepted as sent attachment eviden
   const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
   const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?`Öppna bild 1 av 3: ${name}`:null},closest(){return null}};
   const userTurn={matches(selector){return selector.includes('article')},querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files}); e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]}); e.attachmentNodes.push(composerCard); e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  assert.equal(e.adapter.superUploadState({token:'super'}).submittedAttachmentsMatch,true);
+});
+test('Sent gallery is read from the outer conversation turn when the role node is nested',()=>{
+  const name='nested-gallery.png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
+  const imageButton={isConnected:true,hidden:false,
+    getAttribute(key){return key==='aria-label'?`Open image 1 of 1: ${name}`:null},closest(){return null}};
+  const outerTurn={isConnected:true,
+    matches(selector){return selector.includes('conversation-turn')||selector.includes('article')},
+    contains(node){return node===imageButton},
+    querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const innerArticle={isConnected:true,matches(selector){return selector==='article'},querySelectorAll(){return []},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){
+    if(selector==='[data-testid^="conversation-turn-"]')return outerTurn;
+    if(selector==='article')return innerArticle;
+    return null;
+  }};
+  e.adapter.beginSuperUpload({token:'super',types:files});e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]});e.attachmentNodes.push(composerCard);e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.submittedUserTurnFound,true);
+  assert.equal(state.submittedAttachmentCount,1);
+  assert.equal(state.submittedAttachmentsMatch,true);
+});
+test('Sent gallery accepts an exact filename exposed only by a child image alt',()=>{
+  const name='alt-only-image.png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
+  const image={isConnected:true,getAttribute(key){return key==='alt'?name:null},closest(selector){return selector.includes('button')?imageButton:null}};
+  const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?'Open image':null},contains(node){return node===image},closest(){return null}};
+  const userTurn={isConnected:true,matches(selector){return selector.includes('conversation-turn')||selector.includes('article')},
+    contains(node){return node===imageButton||node===image},querySelectorAll(selector){
+      if(selector.includes('img[alt]'))return [image];
+      return selector.includes('button')?[imageButton]:[];
+    },closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector==='[data-testid^="conversation-turn-"]'?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files});e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]});e.attachmentNodes.push(composerCard);e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.submittedAttachmentMatchedCount,1);
+  assert.equal(state.submittedAttachmentsMatch,true);
+});
+test('Sent attachment coverage retains a missing second duplicate filename',()=>{
+  const name='same.png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCards=[1,2].map(()=>environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0]);
+  const imageButton={isConnected:true,hidden:false,getAttribute(key){return key==='aria-label'?`Open image 1 of 1: ${name}`:null},closest(){return null}};
+  const userTurn={isConnected:true,matches(selector){return selector.includes('conversation-turn')||selector.includes('article')},
+    querySelectorAll(selector){return selector.includes('button')?[imageButton]:[]},closest(){return null}};
+  const userMessage={innerText:'First batch',closest(selector){return selector==='[data-testid^="conversation-turn-"]'?userTurn:null}};
+  e.adapter.beginSuperUpload({token:'super',types:files});e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
+  e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name,name]});e.attachmentNodes.push(...composerCards);e.adapter.superUploadState({token:'super'});
+  e.userMessages.push(userMessage);
+  const state=e.adapter.superUploadState({token:'super'});
+  assert.equal(state.submittedAttachmentMatchedCount,1);
+  assert.deepEqual(Array.from(state.unconfirmedFiles),[name]);
+  assert.equal(state.submittedAttachmentsMatch,false);
+});
+test('Extra gallery controls for an already confirmed image do not hide the ten-file send',()=>{
+  const name='fixture-png.png',e=environment({draft:'',observedFileMarkup:true});
+  const composerCard=environment({attachments:[{name}],observedFileMarkup:true}).attachmentNodes[0];
+  const imageButtons=[1,2].map(index=>({isConnected:true,hidden:false,
+    getAttribute(key){return key==='aria-label'?`Open image ${index} of 2: ${name}`:null},closest(){return null}}));
+  const userTurn={matches(selector){return selector.includes('article')},
+    querySelectorAll(selector){return selector.includes('button')?imageButtons:[]},closest(){return null}};
   const userMessage={innerText:'First batch',closest(selector){return selector.includes('conversation-turn')?userTurn:null}};
   e.adapter.beginSuperUpload({token:'super',types:files}); e.adapter.appendSuperUploadMessage({token:'super',text:'First batch',automatic:false});
   e.adapter.configureSuperUploadBatch({token:'super',expectedFiles:[name]}); e.attachmentNodes.push(composerCard); e.adapter.superUploadState({token:'super'});

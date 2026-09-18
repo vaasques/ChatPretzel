@@ -1,4 +1,4 @@
-/* ChatDesk native adapter v0.3.0. Runs in a private WKContentWorld, main frame only.
+/* ChatDesk native adapter. Runs in a private WKContentWorld, main frame only.
    No fetch/XHR hooks, no private endpoints, no unsolicited clipboard access, no file-byte copies.
    Only a native user action can create/consume a native upload permit. */
 (() => {
@@ -8,6 +8,30 @@
   if (!fixture && !(location.protocol === 'https:' && ['chatgpt.com', 'chat.openai.com'].includes(location.hostname))) return;
   const documentID = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let pending = null, superUpload = null, lastClickedFileInput = null, draftTimer = null, disposed = false;
+  // Super Upload polls this adapter while a conversation may contain thousands
+  // of turns.  Keep only small, selector-scoped snapshots of the global DOM
+  // queries used for progress/settled-state detection.  A MutationObserver
+  // invalidates them before the next task; when it is unavailable (notably in
+  // minimal test documents), queries deliberately fall back to live results.
+  const documentQueryCache = new Map();
+  let documentQueryObserver = null;
+  function invalidateDocumentQueryCache() { documentQueryCache.clear(); }
+  function cachedDocumentQueryAll(selector) {
+    const MutationObserverClass = globalThis.MutationObserver;
+    const root = document.documentElement || document;
+    if (!MutationObserverClass || !root?.querySelectorAll) return Array.from(document.querySelectorAll(selector) || []);
+    if (!documentQueryObserver) {
+      try {
+        documentQueryObserver = new MutationObserverClass(invalidateDocumentQueryCache);
+        documentQueryObserver.observe(root, {subtree: true, childList: true, attributes: true, characterData: true});
+      } catch (_) {
+        documentQueryObserver = null;
+        return Array.from(document.querySelectorAll(selector) || []);
+      }
+    }
+    if (!documentQueryCache.has(selector)) documentQueryCache.set(selector, Array.from(document.querySelectorAll(selector) || []));
+    return documentQueryCache.get(selector).filter(node => node?.isConnected !== false);
+  }
   const href = () => location.href;
   function composer() {
     return document.querySelector('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, textarea[data-testid="prompt-textarea"], [data-chatdesk-fixture-composer]');
@@ -61,17 +85,58 @@
     const value = normalizedMessageText(node.innerText || node.textContent || '');
     return value || identifier ? `${identifier}|${value.length}|${textHash(value)}` : '';
   }
+  function turnBoundary(node) {
+    return node?.closest?.('[data-testid^="conversation-turn-"]')
+      || node?.closest?.('article') || node || null;
+  }
+  function laterDocumentNode(current, candidate) {
+    if (!current) return candidate;
+    if (!candidate || current === candidate) return current;
+    const relation = current.compareDocumentPosition?.(candidate) || 0;
+    if (relation & 4) return candidate; // candidate follows current
+    if (relation & 2) return current;   // candidate precedes current
+    const turns = cachedDocumentQueryAll('[data-testid^="conversation-turn-"]');
+    const currentIndex = turns.indexOf(current), candidateIndex = turns.indexOf(candidate);
+    if (currentIndex >= 0 && candidateIndex >= 0) return candidateIndex > currentIndex ? candidate : current;
+    // A copy-action candidate is appended after role candidates below. If a
+    // minimal/transition DOM cannot compare the nodes, prefer that explicit
+    // completed-turn control over a potentially stale role node.
+    return candidate;
+  }
+  function latestAssistantEvidence() {
+    const entries = [];
+    for (const message of cachedDocumentQueryAll('[data-message-author-role="assistant"]')) {
+      entries.push({turn: turnBoundary(message), message});
+    }
+    for (const action of cachedDocumentQueryAll('[data-testid="copy-turn-action-button"]')) {
+      const turn = turnBoundary(action);
+      if (!turn) continue;
+      const message = turn.querySelector?.('[data-message-author-role="assistant"]') || null;
+      entries.push({turn, message});
+    }
+    return entries.reduce((latest, entry) => {
+      if (!latest) return entry;
+      const later = laterDocumentNode(latest.turn, entry.turn);
+      if (later === entry.turn && later !== latest.turn) return entry;
+      if (later === latest.turn && entry.turn !== latest.turn) return latest;
+      return latest.message || !entry.message ? latest : entry;
+    }, null);
+  }
+  function latestAssistantMessage() { return latestAssistantEvidence()?.message || null; }
+  function latestAssistantTurn() { return latestAssistantEvidence()?.turn || null; }
   function latestAssistantSignature() {
-    const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
-    if (messages.length) return messageSignature(messages[messages.length - 1]);
-    const actions = Array.from(document.querySelectorAll('[data-testid="copy-turn-action-button"]'));
-    const last = actions[actions.length - 1];
-    return messageSignature(last?.closest?.('[data-testid^="conversation-turn-"], article') || last);
+    const evidence = latestAssistantEvidence();
+    return messageSignature(evidence?.message || evidence?.turn);
   }
-  function latestUserSignature() {
-    const messages = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
-    return messages.length ? messageSignature(messages[messages.length - 1]) : '';
+  function latestUserMessage() {
+    const messages = cachedDocumentQueryAll('[data-message-author-role="user"]');
+    return messages.length ? messages[messages.length - 1] : null;
   }
+  function latestUserTurn() {
+    const message = latestUserMessage();
+    return turnBoundary(message);
+  }
+  function latestUserSignature() { return messageSignature(latestUserMessage()); }
   function attachmentName(node) {
     if (!node) return '';
     const direct = ['data-file-name', 'data-filename', 'data-name', 'title', 'aria-label']
@@ -96,13 +161,41 @@
     }
     return '';
   }
+  function stripWebsiteCollisionSuffix(value) {
+    return normalizedMessageText(value).replace(/\s*\(\d+\)(?=\.[^.]+$|$)/, '');
+  }
+  function sentNameBelongsToBatch(value) {
+    const name = normalizedMessageText(basename(value));
+    if (!name) return false;
+    const originals = superUpload?.expectedFiles || [];
+    const bound = superUpload?.boundFileNames || [];
+    if (originals.includes(name) || bound.includes(name)) return true;
+    // ChatGPT can rename the same file again between the composer and the sent
+    // gallery (for example foo(2).png -> foo(3).png). Only accept that server
+    // alias when removing one trailing collision suffix maps to exactly one
+    // original file in the current batch. Never strip the original side: a
+    // real report(1).png must remain distinct from report.png.
+    const base = stripWebsiteCollisionSuffix(name);
+    return base !== name && originals.filter(original => original === base).length === 1;
+  }
   function attachmentCards(root = document) {
-    const selectors = '[data-chatdesk-attachment], [data-testid="file-attachment"], [data-testid*="attachment"], [data-testid="file-upload"], [data-testid="file-card"], [data-file-name], [data-filename]';
+    const sentTurn = !!root.matches?.('[data-testid^="conversation-turn-"], article');
+    // On sent turns, ChatGPT wraps every image in one generic
+    // data-testid="attachment-gallery" container. Treating that ancestor as a
+    // card collapses ten child image controls into one generic "Bilder" card
+    // and the ancestor de-duplication then hides all ten real filenames. Keep
+    // broad attachment discovery for the composer, but use only precise card
+    // attributes inside a sent turn; interactive gallery items are collected
+    // separately below.
+    const selectors = sentTurn
+      ? '[data-chatdesk-attachment], [data-testid="file-attachment"], [data-testid="file-card"], [data-file-name], [data-filename]'
+      : '[data-chatdesk-attachment], [data-testid="file-attachment"], [data-testid*="attachment"], [data-testid="file-upload"], [data-testid="file-card"], [data-file-name], [data-filename]';
     const seen = new Set();
     const explicit = Array.from(root.querySelectorAll?.(selectors) || []).filter(node => !seen.has(node) && seen.add(node))
       .filter(node => node.closest?.('[data-chatdesk-attachment], [data-testid="file-attachment"]') === node || !node.closest?.('[data-chatdesk-attachment], [data-testid="file-attachment"]'))
       .filter(visible)
-      .map(node => ({node, name: attachmentName(node)})).filter(card => !!card.name);
+      .map(node => ({node, name: attachmentName(node)})).filter(card => !!card.name)
+      .filter(card => !sentTurn || sentNameBelongsToBatch(card.name));
     // Some file/image cards have a full filename only in a tooltip or alt text.
     // Accept that evidence only inside a remove-capable card or a sent file link;
     // arbitrary prose mentioning a filename is not an attachment.
@@ -127,7 +220,8 @@
     for (const label of Array.from(root.querySelectorAll?.('[title], img[alt]') || [])) {
       if (!visible(label) || composer()?.contains(label)) continue;
       const name = normalizedMessageText(basename(label.getAttribute('title') || label.getAttribute('alt') || ''));
-      if (!expected.includes(name) || explicit.some(card => card.node === label || card.node.contains?.(label))) continue;
+      if (!(sentTurn ? sentNameBelongsToBatch(name) : expected.includes(name))
+          || explicit.some(card => card.node === label || card.node.contains?.(label))) continue;
       let node = label, selected = null;
       for (let depth = 0; node && node !== root && depth < 4; depth++, node = node.parentElement) {
         if (node.matches?.('form, article, [data-testid^="conversation-turn-"]')) break;
@@ -137,14 +231,35 @@
     }
     // Sent attachments are interactive filename buttons/links; their remove
     // controls disappear after sending. Stay scoped to the supplied user turn.
-    if (root.matches?.('[data-testid^="conversation-turn-"], article')) {
-      for (const control of Array.from(root.querySelectorAll?.('button, [role="button"], a[href], [role="group"][aria-label]') || [])) {
+    if (sentTurn) {
+      for (const control of Array.from(root.querySelectorAll?.('button, [role="button"], a[href], [role="group"][aria-label], [aria-haspopup][aria-label], [tabindex][aria-label]') || [])) {
         if (!visible(control)) continue;
         const label = normalizedMessageText(control.getAttribute?.('aria-label') || control.getAttribute?.('title') || control.textContent || '').split('\n')[0];
         const imageLabel = label.match(/^(?:open image(?: \d+ of \d+)?|öppna bild(?: \d+ av \d+)?):\s*(.+)$/i);
-        const name = imageLabel ? imageLabel[1] : label;
-        if (!expected.includes(name) || explicit.some(card => card.node === control || card.node.contains?.(control) || control.contains?.(card.node))) continue;
+        const establishedControl = !!control.matches?.('button, [role="button"], a[href], [role="group"][aria-label]');
+        // aria-haspopup/tabindex are included for ChatGPT's current image
+        // popup owners. A generic focusable page element with aria-label equal
+        // to a filename is not attachment evidence by itself.
+        if (!establishedControl && !imageLabel) continue;
+        const name = normalizedMessageText(basename(imageLabel ? imageLabel[1] : label));
+        if (!sentNameBelongsToBatch(name)
+            || explicit.some(card => card.node === control || card.node.contains?.(control) || control.contains?.(card.node))) continue;
         explicit.push({node: control, name});
+      }
+      // Some sent image galleries deliberately use a generic control label
+      // (for example, “Open image”) and retain the filename only on its child
+      // image. Accept that narrow shape only inside the selected user turn,
+      // only for an exact expected filename, and only once per physical
+      // interactive wrapper. This is not a prose/alt-text fallback.
+      for (const image of Array.from(root.querySelectorAll?.('img[alt], img[title]') || [])) {
+        if (!visible(image)) continue;
+        const name = normalizedMessageText(basename(image.getAttribute?.('alt') || image.getAttribute?.('title') || ''));
+        if (!sentNameBelongsToBatch(name)) continue;
+        const owner = image.closest?.('button, [role="button"], a[href], [aria-haspopup], [tabindex]');
+        if (!owner || owner.isConnected === false || !visible(owner)) continue;
+        if (root.contains && !root.contains(owner)) continue;
+        if (explicit.some(card => card.node === owner || card.node.contains?.(owner) || owner.contains?.(card.node))) continue;
+        explicit.push({node: owner, name});
       }
       // Table/file previews in a sent user turn do not expose filename
       // attributes. Accept only a uniquely matching title stem with the
@@ -221,13 +336,33 @@
         return /remove|delete|ta bort|radera/.test(label);
       }) || null;
   }
-  function cardsMatchNames(cards, names) {
-    const available = multiset(cards.map(card => card.name));
-    return names.every(name => {
-      const count = available.get(name) || 0;
-      if (!count) return false;
-      available.set(name, count - 1); return true;
-    }) && cards.length === names.length;
+  function cardCoverage(cards, names, originalNames = names) {
+    const available = cards.map(card => card.name);
+    const matchedPositions = new Set();
+    const takeExact = (target, index) => {
+      if (!target || matchedPositions.has(index)) return false;
+      const position = available.findIndex(name => name === target);
+      if (position < 0) return false;
+      available[position] = null; matchedPositions.add(index); return true;
+    };
+    // Reserve the names observed in the composer first, then exact originals.
+    // This keeps genuine numbered filenames distinct while still allowing the
+    // sent gallery to expose an original rather than the composer alias.
+    names.forEach((name, index) => takeExact(name, index));
+    originalNames.forEach((name, index) => takeExact(name, index));
+    for (let index = 0; index < names.length; index++) {
+      if (matchedPositions.has(index)) continue;
+      const original = originalNames[index] || names[index];
+      const candidates = available.map((name, position) => ({name, position})).filter(({name}) => name
+        && stripWebsiteCollisionSuffix(name) !== name
+        && stripWebsiteCollisionSuffix(name) === original);
+      // One-to-one and ambiguity-safe: two possible aliases can never satisfy
+      // one expected file, and one alias is consumed at most once.
+      if (candidates.length !== 1) continue;
+      available[candidates[0].position] = null; matchedPositions.add(index);
+    }
+    const missing = names.filter((_, index) => !matchedPositions.has(index));
+    return {matches: missing.length === 0, matched: matchedPositions.size, missing};
   }
   function bindAttachmentNames(cards, names) {
     if (cards.length !== names.length) return null;
@@ -251,17 +386,80 @@
     return !!superUpload?.expectedDraft
       && normalizedMessageText(draftText(c)) === superUpload.expectedDraftKey;
   }
+  function messageTextCandidates(node) {
+    if (!node) return [];
+    const values = new Set();
+    const add = value => {
+      const normalized = normalizedMessageText(value || '');
+      if (normalized) values.add(normalized);
+    };
+    // innerText is what ChatGPT currently renders, but a long sent prompt may
+    // be collapsed behind a localized “Show more” / “Visa mer” button. Keep
+    // textContent as a second, full-DOM candidate instead of trusting only the
+    // visible excerpt.
+    add(node.innerText);
+    add(node.textContent);
+    // Remove only interactive UI and known attachment wrappers from a detached
+    // copy. This preserves exact prompt matching while excluding the collapse
+    // control and filename previews that ChatGPT puts in the same user turn.
+    if (typeof node.cloneNode === 'function') {
+      try {
+        const copy = node.cloneNode(true);
+        const controls = copy.querySelectorAll?.('button, [role="button"], input, select, textarea, [data-testid*="attachment"], [data-testid="file-upload"], [data-testid="file-card"]') || [];
+        for (const control of Array.from(controls)) control.remove?.();
+        add(copy.textContent || copy.innerText);
+      } catch (_) {
+        // An unusual DOM node must not turn a conservative confirmation into a
+        // page error. The original visible/full-text candidates remain usable.
+      }
+    }
+    return Array.from(values);
+  }
+  function matchesExpectedUserText(node) {
+    if (!node || !superUpload?.expectedDraftKey) return false;
+    // Some ChatGPT layouts include attachment labels before the textual message
+    // in the same user turn, while others expose only the text node. A collapsed
+    // message must still match its complete sent text, never merely a prefix.
+    return messageTextCandidates(node).some(value => value === superUpload.expectedDraftKey
+      || value.endsWith(`\n${superUpload.expectedDraftKey}`));
+  }
+  function submittedUserEvidence() {
+    if (!superUpload?.expectedDraftKey) return null;
+    const entries = [];
+    const seen = new Set();
+    const add = (turn, message, explicitlyAttributed) => {
+      if (!turn || seen.has(turn)) return;
+      const textNode = message || turn;
+      if (!matchesExpectedUserText(textNode) && !matchesExpectedUserText(turn)) return;
+      // Role-less fallback is accepted only when the same turn also contains
+      // the exact, multiplicity-aware sent attachment set. This prevents an old
+      // assistant quote or arbitrary page prose from impersonating the batch.
+      if (!explicitlyAttributed) {
+        const originals = superUpload.expectedFiles || [];
+        const expected = superUpload.boundFileNames || originals;
+        if (!expected.length || !cardCoverage(attachmentCards(turn), expected, originals).matches) return;
+      }
+      seen.add(turn);
+      entries.push({turn, message, signature: messageSignature(message || turn)});
+    };
+    for (const message of cachedDocumentQueryAll('[data-message-author-role="user"]')) {
+      add(turnBoundary(message), message, true);
+    }
+    for (const turn of cachedDocumentQueryAll('[data-testid^="conversation-turn-"]').slice(-8)) {
+      const message = turn.querySelector?.('[data-message-author-role="user"]') || null;
+      // A transition layout may temporarily omit the user role, but an
+      // explicitly assistant-attributed turn can never prove that the batch
+      // was submitted by the user, even if it quotes the exact prompt.
+      if (!message && turn.querySelector?.('[data-message-author-role="assistant"]')) continue;
+      add(turn, message, !!message);
+    }
+    return entries.reduce((latest, entry) => {
+      if (!latest) return entry;
+      return laterDocumentNode(latest.turn, entry.turn) === entry.turn ? entry : latest;
+    }, null);
+  }
   function lastUserMatchesExpected() {
-    if (!superUpload?.expectedDraftKey) return false;
-    const messages = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
-    const turns = messages.length ? messages.slice(-1)
-      : Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]')).slice(-4);
-    return turns.some(node => {
-      const value = normalizedMessageText(node.innerText || node.textContent || '');
-      // Some ChatGPT layouts include attachment labels before the textual message in the
-      // same user turn, while others expose only the text node.
-      return value === superUpload.expectedDraftKey || value.endsWith(`\n${superUpload.expectedDraftKey}`);
-    });
+    return !!submittedUserEvidence();
   }
   function moveCaretToEnd(c) {
     if ('value' in c && typeof c.setSelectionRange === 'function') {
@@ -317,8 +515,8 @@
   }
   function messageCounts() {
     return {
-      userMessages: document.querySelectorAll('[data-message-author-role="user"]').length,
-      assistantMessages: document.querySelectorAll('[data-message-author-role="assistant"]').length
+      userMessages: cachedDocumentQueryAll('[data-message-author-role="user"]').length,
+      assistantMessages: cachedDocumentQueryAll('[data-message-author-role="assistant"]').length
     };
   }
   function languageSample() {
@@ -350,8 +548,8 @@
     return !!(form?.matches?.(selector) || form?.querySelector(selector) || document.querySelector(selector));
   }
   function generationInProgress() {
-    if (Array.from(document.querySelectorAll('[data-testid="stop-button"]')).some(visible)) return true;
-    return Array.from(document.querySelectorAll('button[aria-label]')).filter(visible).some(button => {
+    if (cachedDocumentQueryAll('[data-testid="stop-button"]').some(visible)) return true;
+    return cachedDocumentQueryAll('button[aria-label]').filter(visible).some(button => {
       const label = String(button.getAttribute('aria-label') || '').toLowerCase();
       return label.includes('stop generating') || label.includes('stop response')
         || label.includes('stoppa generering') || label.includes('avbryt svar');
@@ -368,7 +566,7 @@
   }
   function visibleAlertText() {
     const cards = composerAttachmentCards(composer());
-    return Array.from(document.querySelectorAll('[role="alert"]')).filter(visible)
+    return cachedDocumentQueryAll('[role="alert"]').filter(visible)
       .filter(node => !cards.some(card => card.node === node || card.node.contains?.(node)))
       .filter(node => !node.closest?.('[data-chatdesk-attachment], [data-testid="file-attachment"], [data-testid*="attachment"], [data-file-name]')).map(node => String(node.innerText || node.textContent || '').trim())
       .filter(text => /something went wrong|network error|server error|failed to (?:upload|send|generate)|(?:upload|file|rate|usage) limit|quota exceeded|too many (?:files|requests)|unsupported file|file type.*not supported|could not (?:upload|send|generate)|upload.*(?:failed|error)|något gick fel|nätverksfel|kunde inte (?:ladda|skicka|generera)|för många (?:filer|förfrågningar)|uppladdning.*(?:misslyck|gräns)/i.test(text))
@@ -488,6 +686,7 @@
     superUpload = {token: args.token, input: selected.input, documentID, phase: 'preparing',
       expectedDraft: null, expectedDraftKey: '', userIntent: false, intentAt: 0,
       baselineUserMessages: messageCounts().userMessages, baselineAssistantMessages: messageCounts().assistantMessages, baselineUserSignature: latestUserSignature(), baselineAssistantSignature: '',
+      baselineSubmittedUserSignature: '',
       expectedFiles: [], attachmentBaseline: [], batchSerial: 0, appendedBatchSerial: null,
       appendedSuffix: '', appendedHref: '', appendedDocumentID: documentID, configuredOnce: false};
     return {...context(), ...messageCounts(), ok: true, accepted: selected.accepted, draft,
@@ -582,6 +781,7 @@
     superUpload.baselineUserSignature = latestUserSignature();
     superUpload.baselineAssistantMessages = counts.assistantMessages;
     superUpload.baselineAssistantSignature = latestAssistantSignature();
+    superUpload.baselineSubmittedUserSignature = submittedUserEvidence()?.signature || '';
     return {...context(), ...counts, ok: true, draft: after, alertText: visibleAlertText()};
   }
   function superUploadState(args) {
@@ -591,14 +791,22 @@
     }
     const button = sendButton(c), uploading = uploadInProgress(c), counts = messageCounts();
     const busy = generationInProgress();
-    const userMessageChanged = counts.userMessages > superUpload.baselineUserMessages
-      || (!!latestUserSignature() && latestUserSignature() !== superUpload.baselineUserSignature);
-    const submittedDraftMatches = userMessageChanged && lastUserMatchesExpected();
+    const submittedUser = submittedUserEvidence();
+    const submittedUserSignature = submittedUser?.signature || '';
+    // Freshness belongs to the matching submitted turn itself. A global user
+    // count increase must not let an older matching prompt confirm a different
+    // newly sent message. Real ChatGPT turn IDs are part of this signature, so
+    // an intentional repeated prompt still produces a new identity.
+    const userMessageChanged = !!submittedUserSignature
+      && submittedUserSignature !== superUpload.baselineSubmittedUserSignature;
+    const lastUserTextMatchesExpected = !!submittedUser;
+    const submittedDraftMatches = userMessageChanged && lastUserTextMatchesExpected;
     const initialMessageAppeared = superUpload.phase === 'waiting-user'
       && (counts.userMessages > superUpload.baselineUserMessages
         || (superUpload.userIntent && submittedDraftMatches));
     if (initialMessageAppeared) superUpload.phase = 'initial-observed';
-    const assistantSignature = latestAssistantSignature();
+    const assistantEvidence = latestAssistantEvidence();
+    const assistantSignature = messageSignature(assistantEvidence?.message || assistantEvidence?.turn);
     const expectedFiles = superUpload.expectedFiles || [];
     const newCards = expectedNewCards();
     const boundNames = bindAttachmentNames(newCards, expectedFiles);
@@ -617,34 +825,62 @@
     const attachmentError = Array.from(failedByName.values()).some(cards => cards.length > 1)
       ? 'An ambiguous attachment upload error requires manual review.' : '';
     const assistantResponseObserved = !!assistantSignature && assistantSignature !== superUpload.baselineAssistantSignature;
-    const assistantTurn = assistantResponseObserved && Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).slice(-1)[0]?.closest?.('[data-testid^="conversation-turn-"], article');
-    const latestUserTurn = Array.from(document.querySelectorAll('[data-message-author-role="user"]')).slice(-1)[0]?.closest?.('[data-testid^="conversation-turn-"], article');
-    const followsSubmittedUser = submittedDraftMatches && !!latestUserTurn && !!assistantTurn
-      && !!(latestUserTurn.compareDocumentPosition?.(assistantTurn) & 4);
-    const submittedCards = latestUserTurn ? attachmentCards(latestUserTurn) : [];
+    const assistantTurn = assistantResponseObserved ? assistantEvidence?.turn || null : null;
+    const currentUserTurn = submittedUser?.turn || null;
+    const followsSubmittedUser = submittedDraftMatches && !!currentUserTurn && !!assistantTurn
+      && !!(currentUserTurn.compareDocumentPosition?.(assistantTurn) & 4);
+    const submittedCards = currentUserTurn ? attachmentCards(currentUserTurn) : [];
+    // Content-free live diagnostics. These counts let native code distinguish
+    // "the user turn disappeared" from "the page changed its gallery shape"
+    // without exporting chat text, filenames, labels, URLs, or raw DOM.
+    const submittedInteractiveCandidateCount = currentUserTurn
+      ? Array.from(currentUserTurn.querySelectorAll?.('button, [role="button"], a[href], [aria-haspopup], [tabindex]') || []).filter(visible).length : 0;
+    const submittedImageCandidateCount = currentUserTurn
+      ? Array.from(currentUserTurn.querySelectorAll?.('img') || []).filter(visible).length : 0;
+    const submittedAttachmentWrapperCandidateCount = currentUserTurn
+      ? Array.from(currentUserTurn.querySelectorAll?.('[data-testid*="attachment"], [data-file-name], [data-filename]') || []).filter(visible).length : 0;
     const submittedNames = superUpload.boundFileNames || expectedFiles;
+    const submittedCoverage = cardCoverage(submittedCards, submittedNames, expectedFiles);
     // Inactive/background WebKit can fade response controls to opacity:0. Keep
     // the strict new-assistant/new-user binding, but accept a settled non-empty
     // assistant turn when its action controls exist but are not visible.
     const responseActions = Array.from(assistantTurn?.querySelectorAll?.('[data-testid="copy-turn-action-button"], [data-testid*="turn-action"], button[aria-label*="Copy"]') || [])
       .filter(node => node.isConnected !== false);
-    const responseTextPresent = normalizedMessageText(assistantTurn?.innerText || assistantTurn?.textContent || '').length > 0;
+    const assistantMessage = assistantEvidence?.message || null;
+    const responseTextPresent = normalizedMessageText(assistantMessage?.innerText || assistantMessage?.textContent
+      || assistantTurn?.innerText || assistantTurn?.textContent || '').length > 0;
+    const responseIsIdle = idleResponseControl(c);
     const responseCompletionEvidence = responseActions.some(visible)
-      || (responseActions.length > 0 && responseTextPresent && idleResponseControl(c));
+      // On the current ChatGPT gallery layout, answer action buttons may be
+      // outside the assistant turn (or absent while the answer is visible).
+      // A fresh, bound answer plus the composer's explicit idle/voice control
+      // is still completion evidence; native code also requires three stable
+      // polls before it can advance the queue.
+      || (responseTextPresent && responseIsIdle);
     const assistantResponseComplete = assistantResponseObserved && followsSubmittedUser && !busy && !!assistantTurn
       && responseCompletionEvidence;
     return {...context(), ...counts, ok: true, phase: superUpload.phase,
       draft: draftText(c), draftMatchesExpected: draftMatchesExpected(c),
       lastUserMatchesExpected: submittedDraftMatches,
+      lastUserTextMatchesExpected, userMessageChanged,
       expectedDraft: superUpload.expectedDraft,
       expectedFiles: expectedFiles.slice(),
       attachmentCount: newCards.length,
       attachmentsReady: !uploading && !failedByName.size && boundNames !== null,
       failedFiles, attachmentError,
       assistantResponseObserved, assistantResponseComplete, assistantSignature,
-      submittedAttachmentsMatch: !!latestUserTurn && submittedDraftMatches && superUpload.boundFileNames !== null && cardsMatchNames(submittedCards, submittedNames),
+      assistantTurnFound: !!assistantTurn, assistantResponseTextPresent: responseTextPresent,
+      assistantResponseActionCount: responseActions.length, responseCompletionEvidence,
+      followsSubmittedUser, submittedUserTurnFound: !!currentUserTurn,
+      submittedUserSignatureChanged: userMessageChanged,
+      submittedAttachmentsMatch: !!currentUserTurn && submittedDraftMatches
+        && superUpload.boundFileNames !== null && submittedCoverage.matches,
       submittedAttachmentCount: submittedCards.length,
-      unconfirmedFiles: submittedNames.filter(name => !submittedCards.some(card => card.name === name)),
+      submittedAttachmentMatchedCount: submittedCoverage.matched,
+      submittedAttachmentExpectedCount: submittedNames.length,
+      submittedInteractiveCandidateCount, submittedImageCandidateCount,
+      submittedAttachmentWrapperCandidateCount,
+      unconfirmedFiles: submittedCoverage.missing,
       userIntent: superUpload.userIntent, intentAt: superUpload.intentAt, uploading,
       busy, idleResponseControl: !busy && idleResponseControl(c),
       sendReady: !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' && !uploading && !busy,
@@ -761,6 +997,7 @@
       if (button && (event.target === button || button.contains?.(event.target))) {
         superUpload.userIntent = true; superUpload.intentAt = Date.now();
         superUpload.expectedDraft = draftText(c); superUpload.expectedDraftKey = normalizedMessageText(superUpload.expectedDraft);
+        superUpload.baselineSubmittedUserSignature = submittedUserEvidence()?.signature || '';
       }
     }
     // Conservative session-memory clearing on explicit account/workspace UI interaction.
@@ -777,6 +1014,7 @@
       superUpload.userIntent = true; superUpload.intentAt = Date.now();
       if (normalizedMessageText(draftText(c))) {
         superUpload.expectedDraft = draftText(c); superUpload.expectedDraftKey = normalizedMessageText(superUpload.expectedDraft);
+        superUpload.baselineSubmittedUserSignature = submittedUserEvidence()?.signature || '';
       }
     }
   }
@@ -786,11 +1024,13 @@
       superUpload.userIntent = true; superUpload.intentAt = Date.now();
       if (normalizedMessageText(draftText(c))) {
         superUpload.expectedDraft = draftText(c); superUpload.expectedDraftKey = normalizedMessageText(superUpload.expectedDraft);
+        superUpload.baselineSubmittedUserSignature = submittedUserEvidence()?.signature || '';
       }
     }
   }
   function teardown() {
     disposed = true; clearTimeout(draftTimer); cancelFiles(); removePreparedSuffix(superUpload); superUpload = null;
+    documentQueryObserver?.disconnect?.(); documentQueryObserver = null; invalidateDocumentQueryCache();
     document.removeEventListener('input', onInput, true);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('copy', onCopy, true);

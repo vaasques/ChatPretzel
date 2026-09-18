@@ -6,9 +6,21 @@ import ChatDeskCore
 
 /// Operation-scoped copies used only when ChatGPT would otherwise receive duplicate
 /// basenames. Originals are never renamed or modified.
-final class SuperUploadFileStaging {
+/// This object has immutable state after creation and all filesystem mutations are
+/// serialized through `SuperUploadCoordinator.io`.
+final class SuperUploadFileStaging: @unchecked Sendable {
+    /// A deterministic upload name. Planning is metadata-only: duplicate source
+    /// files are not cloned until their ten-file batch is about to be handed to
+    /// WebKit. This keeps a very large queue from creating thousands of temporary
+    /// copies before the first message is even ready.
+    struct PlannedFile {
+        let original: URL
+        let stagedName: String?
+
+        var uploadName: String { stagedName ?? original.lastPathComponent }
+    }
+
     let directory: URL
-    private var used: Set<String> = []
     private let fm = FileManager.default
 
     init(operationID: UUID) throws {
@@ -17,38 +29,64 @@ final class SuperUploadFileStaging {
     }
     deinit { try? fm.removeItem(at: directory) }
 
-    func prepare(_ originals: [URL]) -> [Result<URL, Error>] {
-        let names = Set(originals.map { $0.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() })
+    /// Computes duplicate-safe names in source order without accessing file bytes
+    /// or creating staging copies. The result has one small metadata value per
+    /// selected URL, even for queues with thousands of files.
+    func plan(_ originals: [URL]) -> [PlannedFile] {
+        let reservedNames = Set(originals.map { Self.nameKey($0.lastPathComponent) })
         var occurrences: Set<String> = []
+        var stagedNames: Set<String> = []
+        var nextSuffix: [String: Int] = [:]
         return originals.map { original in
-            Result {
-                let lease = FileAccessLease(original)
-                _ = try FileValidator.check(lease)
-                return try withExtendedLifetime(lease) {
-                    let key = original.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased()
-                    if !occurrences.insert(key).inserted { return try stageDuplicate(original, reservedNames: names) }
-                    return original
+            let base = original.lastPathComponent.precomposedStringWithCanonicalMapping
+            let key = Self.nameKey(base)
+            guard !occurrences.insert(key).inserted else {
+                return PlannedFile(original: original, stagedName: nil)
+            }
+            let ext = original.pathExtension
+            let stem = ext.isEmpty ? base : String(base.dropLast(ext.count + 1))
+            var number = nextSuffix[key, default: 2]
+            while true {
+                let suffix = " \(number)"
+                let maxStem = max(1, 240 - suffix.count - (ext.isEmpty ? 0 : ext.count + 1))
+                var clipped = String(stem.prefix(maxStem))
+                while (clipped + suffix + (ext.isEmpty ? "" : "." + ext)).utf8.count > 240, !clipped.isEmpty {
+                    clipped.removeLast()
+                }
+                let name = ext.isEmpty ? clipped + suffix : clipped + suffix + "." + ext
+                number += 1
+                let nameKey = Self.nameKey(name)
+                if !stagedNames.contains(nameKey), !reservedNames.contains(nameKey) {
+                    stagedNames.insert(nameKey)
+                    nextSuffix[key] = number
+                    return PlannedFile(original: original, stagedName: name)
                 }
             }
         }
     }
 
-    private func stageDuplicate(_ original: URL, reservedNames: Set<String>) throws -> URL {
-        let base = original.lastPathComponent.precomposedStringWithCanonicalMapping
-        let key = base.lowercased()
-        if !used.contains(key) && !reservedNames.contains(key) { used.insert(key); return original }
-        let ext = original.pathExtension
-        let stem = ext.isEmpty ? base : String(base.dropLast(ext.count + 1))
-        var n = 2
-        var name = base
-        repeat {
-            let suffix = " \(n)"
-            let maxStem = max(1, 240 - suffix.count - (ext.isEmpty ? 0 : ext.count + 1))
-            var clipped = String(stem.prefix(maxStem))
-            while (clipped + suffix + (ext.isEmpty ? "" : "." + ext)).utf8.count > 240, !clipped.isEmpty { clipped.removeLast() }
-            name = ext.isEmpty ? clipped + suffix : clipped + suffix + "." + ext
-            n += 1
-        } while used.contains(name.lowercased()) || reservedNames.contains(name.lowercased())
+    /// Validates and creates only the staged copies needed by one active batch.
+    /// Call this on the coordinator's I/O queue.
+    func materialize(_ files: [PlannedFile]) -> [Result<URL, Error>] {
+        files.map { file in
+            Result {
+                let lease = FileAccessLease(file.original)
+                _ = try FileValidator.check(lease)
+                return try withExtendedLifetime(lease) {
+                    guard let name = file.stagedName else { return file.original }
+                    return try stageDuplicate(file.original, named: name)
+                }
+            }
+        }
+    }
+
+    /// Compatibility helper for the small staging unit tests. Product code plans
+    /// once and materializes only the current batch.
+    func prepare(_ originals: [URL]) -> [Result<URL, Error>] {
+        materialize(plan(originals))
+    }
+
+    private func stageDuplicate(_ original: URL, named name: String) throws -> URL {
         let target = directory.appendingPathComponent(name)
         let lease = FileAccessLease(original)
         guard fm.fileExists(atPath: original.path) else { throw CocoaError(.fileNoSuchFile) }
@@ -63,8 +101,11 @@ final class SuperUploadFileStaging {
             }
             if !cloned { try fm.copyItem(at: original, to: target) }
         }
-        used.insert(name.lowercased())
         return target
+    }
+
+    private static func nameKey(_ value: String) -> String {
+        value.precomposedStringWithCanonicalMapping.lowercased()
     }
 
     func release(_ urls: [URL]) {
@@ -74,7 +115,17 @@ final class SuperUploadFileStaging {
     }
 }
 
+enum SuperUploadProgressStage: Equatable, Sendable {
+    /// The queue is validating lightweight local metadata before touching the
+    /// ChatGPT composer. This gives very large clipboard selections visible,
+    /// cancellable progress instead of appearing to freeze at zero.
+    case checking
+    /// A validated batch is being prepared, attached, or confirmed in chat.
+    case uploading
+}
+
 struct SuperUploadProgress: Equatable, Sendable {
+    let stage: SuperUploadProgressStage
     let processedFiles: Int
     let totalFiles: Int
 }
@@ -166,11 +217,12 @@ struct SuperUploadRouteTracker: Sendable {
 @MainActor
 final class SuperUploadCoordinator {
     private struct Candidate {
-        let url: URL
+        let plannedFile: SuperUploadFileStaging.PlannedFile
         let extensionName: String
         let mime: String
 
         var typeKey: String { "\(extensionName.lowercased())\u{1f}\(mime.lowercased())" }
+        var sourceURL: URL { plannedFile.original }
     }
 
     private enum SkipReason {
@@ -256,7 +308,12 @@ final class SuperUploadCoordinator {
         let token: String
         let selectedCount: Int
         var candidates: [Candidate] = []
+        var preflightFiles: [SuperUploadFileStaging.PlannedFile] = []
+        var preflightOffset = 0
         var skipped: [SkippedItem]
+        /// Keeps the attachment panel useful without allowing thousands of
+        /// rejected clipboard entries to become thousands of native table rows.
+        var recordedSkippedItems = 0
         var plan: SuperUploadPlan?
         var language: SuperUploadLanguage = .english
         var batchIndex = 0
@@ -272,6 +329,16 @@ final class SuperUploadCoordinator {
         var initialIntentTime: Date?
         var emptyDraftSince: Date?
         var automaticSubmitTime: Date?
+        // Content-free telemetry retained only for the current automatic-send
+        // confirmation. It makes a fail-closed stop actionable without keeping
+        // chat text, filenames, paths, or DOM content in native state.
+        var automaticMessageVerified = false
+        var automaticUserTurnFound = false
+        var automaticMatchedAttachments = 0
+        var automaticExpectedAttachments = 0
+        var automaticInteractiveCandidates = 0
+        var automaticImageCandidates = 0
+        var automaticAttachmentWrappers = 0
         var assistantReadyChecks = 0
         var sawAssistantBusy = false
         var assistantSignature = ""
@@ -283,6 +350,7 @@ final class SuperUploadCoordinator {
         var expectedFiles: [String] = []
         var routeTracker: SuperUploadRouteTracker?
         var staging: SuperUploadFileStaging?
+        var activeStagedURLs: [URL] = []
         let automaticallySendFirstBatch: Bool
         var activity: NSObjectProtocol?
         // Store the availability-gated WebKit enum as its raw value so the
@@ -318,6 +386,11 @@ final class SuperUploadCoordinator {
     private let adapter: WebAdapter
     private let attachments: AttachmentCoordinator
     private let io = DispatchQueue(label: "ChatPretzel.super-upload-preflight", qos: .userInitiated)
+    /// Validation never reads file bytes into app memory, but URL metadata may
+    /// still involve cloud/Finder I/O. Keeping each hop small makes Cancel and
+    /// the native event loop responsive for queues in the thousands.
+    private static let preflightChunkSize = 64
+    private static let maximumDetailedSkippedRecords = 100
     private var session: Session?
     var onNotice: ((String) -> Void)?
     /// Non-nil after the user's first send, or immediately after an explicitly
@@ -366,39 +439,64 @@ final class SuperUploadCoordinator {
                     webView.configuration.preferences.inactiveSchedulingPolicy = .none
                 }
             }
-            onProgress?(SuperUploadProgress(processedFiles: 0, totalFiles: current.selectedCount))
+            onProgress?(SuperUploadProgress(stage: .checking,
+                                             processedFiles: 0,
+                                             totalFiles: current.selectedCount))
         }
         onNotice?("Super Upload is checking \(selectedCount) items locally. File contents are not loaded into app memory.")
-        let urls = selection.urls
-        let sessionToken = current.token
-        let staging = current.staging!
+        current.preflightFiles = current.staging!.plan(selection.urls)
+        preflightNextChunk(current)
+        return true
+    }
+
+    /// Preflight validation is deliberately streamed. The old eager implementation
+    /// built a staging result and a second validation result for every selected URL
+    /// before it returned to the main actor; 3,000 images could therefore retain
+    /// several large arrays and thousands of duplicate staging copies at once.
+    private func preflightNextChunk(_ current: Session) {
+        guard session === current else { return }
+        guard current.preflightOffset < current.preflightFiles.count else {
+            begin(current)
+            return
+        }
+
+        let start = current.preflightOffset
+        let end = min(start + Self.preflightChunkSize, current.preflightFiles.count)
+        let files = Array(current.preflightFiles[start..<end])
+        let token = current.token
         io.async { [weak self] in
-            let stagedURLs = staging.prepare(urls)
-            let results = zip(urls, stagedURLs).map { original, staged -> PreflightItem in
+            let results = files.map { planned -> PreflightItem in
                 do {
-                    let url = try staged.get()
-                    let lease = FileAccessLease(url)
+                    let lease = FileAccessLease(planned.original)
                     let file = try FileValidator.check(lease)
                     return PreflightItem(candidate: Candidate(
-                        url: file.url,
+                        plannedFile: planned,
                         extensionName: file.url.pathExtension.lowercased(),
                         mime: file.mime.lowercased()), skipped: nil)
                 } catch let error as FileValidationError {
                     return PreflightItem(candidate: nil, skipped: SkippedItem(
-                        filename: original.lastPathComponent, count: 1,
+                        filename: planned.original.lastPathComponent, count: 1,
                         reason: Self.reason(for: error)))
                 } catch {
                     return PreflightItem(candidate: nil, skipped: SkippedItem(
-                        filename: original.lastPathComponent, count: 1, reason: .unavailable))
+                        filename: planned.original.lastPathComponent, count: 1, reason: .unavailable))
                 }
             }
             DispatchQueue.main.async {
-                guard let self, let current = self.session, current.token == sessionToken else { return }
-                self.begin(current, results: results)
+                guard let self, let active = self.session, active.token == token else { return }
+                for item in results {
+                    if let candidate = item.candidate { active.candidates.append(candidate) }
+                    if let skipped = item.skipped { active.skipped.append(skipped) }
+                }
+                active.preflightOffset = end
+                if active.automaticallySendFirstBatch {
+                    self.onProgress?(SuperUploadProgress(stage: .checking,
+                                                         processedFiles: end,
+                                                         totalFiles: active.selectedCount))
+                }
+                self.preflightNextChunk(active)
             }
-            withExtendedLifetime(staging) {}
         }
-        return true
     }
 
     func cancel(reason: String = "Super Upload was cancelled. No additional batches were sent.") {
@@ -420,12 +518,13 @@ final class SuperUploadCoordinator {
             from: oldURL, to: newURL, maySettleConversation: maySettle) == true
     }
 
-    private func begin(_ current: Session, results: [PreflightItem]) {
+    private func begin(_ current: Session) {
         guard session === current else { return }
-        for item in results {
-            if let candidate = item.candidate { current.candidates.append(candidate) }
-            if let skipped = item.skipped { current.skipped.append(skipped) }
-        }
+        // Candidates retain the compact metadata needed for the remaining queue;
+        // release the original planning list before querying the page so a large
+        // selection is not represented twice for the whole upload.
+        current.preflightFiles.removeAll(keepingCapacity: false)
+        current.preflightOffset = 0
         guard !current.candidates.isEmpty else {
             recordSkipped(current)
             stop("Super Upload stopped because none of the selected items are readable local files. Nothing was sent.")
@@ -447,7 +546,7 @@ final class SuperUploadCoordinator {
                   accepted.count == groups.count else {
                 if case .success(let info) = result, Self.bool(info["unsupportedAll"]) {
                     current.skipped.append(contentsOf: current.candidates.map {
-                        SkippedItem(filename: $0.url.lastPathComponent, count: 1,
+                        SkippedItem(filename: $0.sourceURL.lastPathComponent, count: 1,
                                     reason: .pageUnsupported)
                     })
                 }
@@ -461,7 +560,7 @@ final class SuperUploadCoordinator {
             let rejectedByPage = current.candidates.filter { !acceptedKeys.contains($0.typeKey) }
             current.candidates.removeAll { !acceptedKeys.contains($0.typeKey) }
             current.skipped.append(contentsOf: rejectedByPage.map {
-                SkippedItem(filename: $0.url.lastPathComponent, count: 1, reason: .pageUnsupported)
+                SkippedItem(filename: $0.sourceURL.lastPathComponent, count: 1, reason: .pageUnsupported)
             })
             current.language = Self.detectLanguage(
                 draft: info["draft"] as? String ?? "",
@@ -479,43 +578,113 @@ final class SuperUploadCoordinator {
                 return
             }
             current.plan = plan
+            if current.automaticallySendFirstBatch {
+                self.onProgress?(SuperUploadProgress(stage: .uploading,
+                                                     processedFiles: 0,
+                                                     totalFiles: plan.totalFiles))
+            }
             self.uploadBatch(current)
         }
     }
 
     private func uploadBatch(_ current: Session) {
         guard session === current, let plan = current.plan,
-              plan.batches.indices.contains(current.batchIndex) else { return }
+              plan.batches.indices.contains(current.batchIndex),
+              let staging = current.staging else { return }
         let batch = plan.batches[current.batchIndex]
-        let urls = Array(current.candidates[(batch.start - 1)..<batch.end].map(\.url))
-        current.expectedFiles = urls.map { $0.lastPathComponent }
+        let candidates = Array(current.candidates[(batch.start - 1)..<batch.end])
+        current.expectedFiles = []
+        current.activeStagedURLs = []
         current.phase = .handingOff
         onNotice?("Super Upload is preparing batch \(batch.number) of \(batch.totalBatches) (files \(batch.start)–\(batch.end) of \(batch.totalFiles)).")
-        let batchSelection = FileSelection(urls: urls, id: current.operationID)
-        // Bind the exact filenames before opening the native picker.  This is an
-        // assertion boundary: native handoff is not evidence that the page accepted them.
-        adapter.call("configureSuperUploadBatch", arguments: [
-            "token": current.token, "expectedFiles": current.expectedFiles
-        ]) { [weak self, weak current] configured in
-            guard let self, let current, self.session === current else { return }
-            guard case .success(let info) = configured, Self.bool(info["ok"]) else {
-                self.stop(Self.errorMessage(configured) ?? "ChatGPT could not bind the current batch of filenames.")
-                return
+        let token = current.token
+        // Duplicate basename copies are materialised only for this one ten-file
+        // handoff. A 3,000-file queue therefore has at most ten temporary copies
+        // (and ten active security grants) instead of thousands.
+        io.async { [weak self] in
+            let materialized = staging.materialize(candidates.map(\.plannedFile))
+            DispatchQueue.main.async {
+                guard let self, let active = self.session, active.token == token else { return }
+                var urls: [URL] = []
+                var stagedURLs: [URL] = []
+                for (candidate, result) in zip(candidates, materialized) {
+                    switch result {
+                    case .success(let url):
+                        urls.append(url)
+                        if url.deletingLastPathComponent().standardizedFileURL == staging.directory.standardizedFileURL {
+                            stagedURLs.append(url)
+                        }
+                    case .failure(let error):
+                        let reason: SkipReason
+                        if let validationError = error as? FileValidationError {
+                            reason = Self.reason(for: validationError)
+                        } else {
+                            reason = .unavailable
+                        }
+                        let item = SkippedItem(filename: candidate.sourceURL.lastPathComponent,
+                                               count: 1, reason: reason)
+                        active.skipped.append(item)
+                        active.runtimeSkippedCount += 1
+                        active.recordedSkippedItems += 1
+                        self.attachments.recordSkipped(operationID: active.operationID,
+                                                       filename: item.recordName,
+                                                       detail: item.reason.english)
+                        self.onNotice?("Super Upload skipped \(item.recordName): \(item.reason.english).")
+                    }
+                }
+                active.activeStagedURLs = stagedURLs
+                active.expectedFiles = urls.map(\.lastPathComponent)
+                guard !urls.isEmpty else {
+                    self.advancePastEmptyBatch(active)
+                    return
+                }
+                let batchSelection = FileSelection(urls: urls, id: active.operationID)
+                // Bind the exact filenames before opening the native picker. This
+                // is an assertion boundary: native handoff is not evidence that
+                // the page accepted the attachments.
+                self.adapter.call("configureSuperUploadBatch", arguments: [
+                    "token": active.token, "expectedFiles": active.expectedFiles
+                ]) { [weak self, weak active] configured in
+                    guard let self, let active, self.session === active else { return }
+                    guard case .success(let info) = configured, Self.bool(info["ok"]) else {
+                        self.stop(Self.errorMessage(configured) ?? "ChatGPT could not bind the current batch of filenames.")
+                        return
+                    }
+                    self.attachments.start(batchSelection,
+                                           requireFocus: active.batchIndex == 0 && !active.automaticallySendFirstBatch,
+                                           superUploadToken: active.token) { [weak self, weak active] result in
+                        guard let self, let active, self.session === active else { return }
+                        switch result {
+                        case .failure(let failure):
+                            self.stop("Super Upload stopped: \(failure.localizedDescription)")
+                        case .success:
+                            active.phase = .waitingForUpload
+                            active.deadline = Date().addingTimeInterval(5 * 60)
+                            active.handoffTime = Date()
+                            active.readyChecks = 0
+                            self.pollForUpload(active)
+                        }
+                    }
+                }
             }
-            attachments.start(batchSelection, requireFocus: current.batchIndex == 0 && !current.automaticallySendFirstBatch,
-                              superUploadToken: current.token) { [weak self, weak current] result in
-            guard let self, let current, self.session === current else { return }
-            switch result {
-            case .failure(let failure):
-                self.stop("Super Upload stopped: \(failure.localizedDescription)")
-            case .success:
-                current.phase = .waitingForUpload
-                current.deadline = Date().addingTimeInterval(5 * 60)
-                current.handoffTime = Date()
-                current.readyChecks = 0
-                self.pollForUpload(current)
-            }
-            }
+        }
+    }
+
+    /// A file may disappear or lose access after the initial metadata check. Do
+    /// not retry or overwrite anything: safely omit that empty batch and retain
+    /// the fixed original batch boundaries for all following files.
+    private func advancePastEmptyBatch(_ current: Session) {
+        guard session === current, let plan = current.plan else { return }
+        releaseStagedBatch(current)
+        if current.batchIndex + 1 < plan.batches.count {
+            current.skippedBatchCount += 1
+            current.batchIndex += 1
+            attachments.releaseSuperUploadBatch(operationID: current.operationID)
+            uploadBatch(current)
+        } else if current.hasSubmittedInitial {
+            appendProgressMessage(current)
+        } else {
+            stop("None of the selected files could be attached. Nothing was sent.")
         }
     }
 
@@ -536,18 +705,7 @@ final class SuperUploadCoordinator {
                     guard let self, let current, self.session === current else { return }
                     current.readyChecks = 0
                     if current.expectedFiles.isEmpty {
-                        guard let plan = current.plan else { return }
-                        if current.batchIndex + 1 < plan.batches.count {
-                            self.releaseStagedBatch(current)
-                            current.skippedBatchCount += 1
-                            current.batchIndex += 1
-                            self.attachments.releaseSuperUploadBatch(operationID: current.operationID)
-                            self.uploadBatch(current)
-                        } else if current.hasSubmittedInitial {
-                            self.appendProgressMessage(current)
-                        } else {
-                            self.stop("None of the selected files could be attached. Nothing was sent.")
-                        }
+                        self.advancePastEmptyBatch(current)
                     } else {
                         self.later(current, after: 0.5) { [weak self, weak current] in
                             guard let self, let current else { return }
@@ -598,6 +756,13 @@ final class SuperUploadCoordinator {
             current.initialIntentTime = nil
             current.emptyDraftSince = nil
             current.automaticSubmitTime = nil
+            current.automaticMessageVerified = false
+            current.automaticUserTurnFound = false
+            current.automaticMatchedAttachments = 0
+            current.automaticExpectedAttachments = current.expectedFiles.count
+            current.automaticInteractiveCandidates = 0
+            current.automaticImageCandidates = 0
+            current.automaticAttachmentWrappers = 0
             // The first batch is explicitly user-authorised. Do not expire its draft
             // while the user is away; automatic batches retain their finite guard.
             current.deadline = automatic ? Date().addingTimeInterval(2 * 60) : .distantFuture
@@ -711,8 +876,11 @@ final class SuperUploadCoordinator {
                 }
                 if Date().timeIntervalSince(current.initialIntentTime ?? Date()) >= 60 {
                     let count = Self.integer(info["submittedAttachmentCount"]) ?? 0
+                    let controls = Self.integer(info["submittedInteractiveCandidateCount"]) ?? 0
+                    let images = Self.integer(info["submittedImageCandidateCount"]) ?? 0
+                    let wrappers = Self.integer(info["submittedAttachmentWrapperCandidateCount"]) ?? 0
                     let missing = (info["unconfirmedFiles"] as? [String] ?? []).prefix(10).joined(separator: ", ")
-                    self.stop("Super Upload could not confirm the first sent batch within 60 seconds (message: \(submittedMessageVisible ? "confirmed" : "unconfirmed"), attachment cards: \(count)/\(current.expectedFiles.count)).\(missing.isEmpty ? "" : " Unconfirmed: \(missing).")")
+                    self.stop("Super Upload could not confirm the first sent batch within 60 seconds (message: \(submittedMessageVisible ? "confirmed" : "unconfirmed"), attachment cards: \(count)/\(current.expectedFiles.count), live controls/images/wrappers: \(controls)/\(images)/\(wrappers)).\(missing.isEmpty ? "" : " Unconfirmed: \(missing).")")
                     return
                 }
             }
@@ -772,7 +940,11 @@ final class SuperUploadCoordinator {
     private func pollAutomaticSubmission(_ current: Session) {
         guard session === current else { return }
         guard Date() <= current.deadline else {
-            stop("Super Upload stopped because ChatGPT did not confirm the automatic message in the conversation.")
+            let batch = effectiveBatch(current)?.number ?? current.batchIndex + 1
+            let message = current.automaticMessageVerified ? "verified" : "not verified"
+            let turn = current.automaticUserTurnFound ? "found" : "not found"
+            let expected = max(current.automaticExpectedAttachments, current.expectedFiles.count)
+            stop("Super Upload stopped because ChatGPT did not confirm the automatic message in the conversation (batch \(batch); message \(message); user turn \(turn); attachments \(current.automaticMatchedAttachments) of \(expected) verified; live controls/images/wrappers \(current.automaticInteractiveCandidates)/\(current.automaticImageCandidates)/\(current.automaticAttachmentWrappers)).")
             return
         }
         readState(current) { [weak self, weak current] info in
@@ -780,6 +952,14 @@ final class SuperUploadCoordinator {
             let users = Self.integer(info["userMessages"]) ?? current.baselineUserMessages
             let messageVisible = Self.bool(info["lastUserMatchesExpected"])
             let attachmentsMatch = Self.bool(info["submittedAttachmentsMatch"])
+            current.automaticMessageVerified = messageVisible
+            current.automaticUserTurnFound = Self.bool(info["submittedUserTurnFound"])
+            current.automaticMatchedAttachments = Self.integer(info["submittedAttachmentMatchedCount"]) ?? 0
+            current.automaticExpectedAttachments = Self.integer(info["submittedAttachmentExpectedCount"])
+                ?? current.expectedFiles.count
+            current.automaticInteractiveCandidates = Self.integer(info["submittedInteractiveCandidateCount"]) ?? 0
+            current.automaticImageCandidates = Self.integer(info["submittedImageCandidateCount"]) ?? 0
+            current.automaticAttachmentWrappers = Self.integer(info["submittedAttachmentWrapperCandidateCount"]) ?? 0
             if users > current.baselineUserMessages + 1 {
                     self.stop("Super Upload stopped because another message was sent while the automatic batch was pending.")
                     return
@@ -799,8 +979,18 @@ final class SuperUploadCoordinator {
         guard session === current, let batch = effectiveBatch(current) else { return }
         current.submittedFiles = batch.sentAfterBatch
         if !current.hasSubmittedInitial { current.hasSubmittedInitial = true }
-        onProgress?(SuperUploadProgress(processedFiles: batch.sentAfterBatch,
+        onProgress?(SuperUploadProgress(stage: .uploading,
+                                        processedFiles: batch.sentAfterBatch,
                                         totalFiles: batch.totalFiles))
+        // The reply gate exists solely to protect the *next* automatic batch.
+        // Once the final user message and all of its attachment cards have been
+        // confirmed, there is no subsequent batch to protect. Keeping the
+        // frosted overlay until a potentially slow final answer arrives makes a
+        // completed 41-file queue look stuck and needlessly locks the app.
+        if batch.isLast {
+            finish(current, finalResponseMayStillBeProcessing: true)
+            return
+        }
         current.phase = .waitingForAssistant
         current.assistantReadyChecks = 0
         current.sawAssistantBusy = false
@@ -886,7 +1076,10 @@ final class SuperUploadCoordinator {
     }
 
     private func readState(_ current: Session, completion: @escaping ([String: Any]) -> Void) {
-        adapter.call("superUploadState", arguments: ["token": current.token]) { [weak self, weak current] result in
+        // A queued WebKit callback used to leave the frosted interaction lock
+        // visible forever under a heavily loaded image conversation.  A timeout
+        // fails closed here: it unlocks and sends no unverified next batch.
+        adapter.call("superUploadState", arguments: ["token": current.token], timeout: 15) { [weak self, weak current] result in
             guard let self, let current, self.session === current else { return }
             guard case .success(let info) = result, Self.bool(info["ok"]) else {
                 self.stop(Self.errorMessage(result) ?? "The Super Upload session is no longer attached to this ChatGPT page.")
@@ -918,7 +1111,7 @@ final class SuperUploadCoordinator {
         }
     }
 
-    private func finish(_ current: Session) {
+    private func finish(_ current: Session, finalResponseMayStillBeProcessing: Bool = false) {
         guard session === current, let plan = current.plan else { return }
         releaseExecutionResources(current)
         session = nil
@@ -928,7 +1121,10 @@ final class SuperUploadCoordinator {
         retireStaging(current)
         let skipped = current.skipped.reduce(0) { $0 + $1.count }
         let suffix = skipped > 0 ? " \(skipped) unsupported or unreadable items were skipped and reported in the conversation." : ""
-        onNotice?("Super Upload finished: \(current.submittedFiles) files were confirmed in the conversation across \(plan.batches.count - current.skippedBatchCount) batches.\(suffix)")
+        let finalResponse = finalResponseMayStillBeProcessing
+            ? " ChatGPT may still be processing the final batch."
+            : ""
+        onNotice?("Super Upload finished: \(current.submittedFiles) files were confirmed in the conversation across \(plan.batches.count - current.skippedBatchCount) batches.\(suffix)\(finalResponse)")
     }
 
     private func stop(_ reason: String) {
@@ -958,33 +1154,68 @@ final class SuperUploadCoordinator {
     }
 
     private func releaseStagedBatch(_ current: Session) {
-        guard let staging = current.staging, let plan = current.plan else { return }
-        let batch = plan.batches[current.batchIndex]
-        let urls = current.candidates[(batch.start - 1)..<batch.end].map(\.url)
+        guard let staging = current.staging, !current.activeStagedURLs.isEmpty else { return }
+        let urls = current.activeStagedURLs
+        current.activeStagedURLs.removeAll(keepingCapacity: true)
         io.async { staging.release(urls) }
     }
 
     private func retireStaging(_ current: Session) {
         guard let staging = current.staging else { return }
+        let urls = current.activeStagedURLs
+        current.activeStagedURLs.removeAll(keepingCapacity: false)
         current.staging = nil
-        // Serialize deletion behind in-flight preflight/copy work; never block the UI.
-        io.async { withExtendedLifetime(staging) {} }
+        // Serialize the final batch cleanup behind any in-flight validation/copy
+        // work; never block the UI or leave duplicate-name copies behind.
+        io.async {
+            staging.release(urls)
+            withExtendedLifetime(staging) {}
+        }
     }
 
     private func recordSkipped(_ current: Session) {
-        guard !current.skipped.isEmpty else { return }
-        for item in current.skipped {
+        guard current.recordedSkippedItems < current.skipped.count else { return }
+        let pending = current.skipped.dropFirst(current.recordedSkippedItems)
+        let detailedCapacity = max(0, Self.maximumDetailedSkippedRecords - current.recordedSkippedItems)
+        for item in pending.prefix(detailedCapacity) {
             attachments.recordSkipped(operationID: current.operationID,
                                       filename: item.recordName,
                                       detail: item.reason.english)
         }
+        let hidden = pending.dropFirst(detailedCapacity)
+        if !hidden.isEmpty {
+            let hiddenCount = hidden.reduce(0) { $0 + $1.count }
+            attachments.recordSkipped(operationID: current.operationID,
+                                      filename: "Additional skipped files",
+                                      detail: "\(hiddenCount) additional items were skipped; see the Super Upload message for the summary.")
+        }
+        current.recordedSkippedItems = current.skipped.count
     }
 
     private func promptSkipSummaries(_ current: Session) -> [String] {
-        let shown = Array(current.skipped.prefix(8))
+        let total = current.skipped.reduce(0) { $0 + $1.count }
+        // A large Finder/clipboard selection can contain thousands of stale
+        // references. Listing their long generated filenames in the first ChatGPT
+        // message makes the page collapse that message and is both noisy and a
+        // poor privacy default. Preserve a small detailed list for ordinary
+        // cases, but use a compact reason summary for large groups.
+        if total > 50 {
+            var byReason: [String: Int] = [:]
+            for item in current.skipped {
+                let reason = item.reason.promptText(current.language)
+                byReason[reason, default: 0] += item.count
+            }
+            return byReason
+                .sorted { lhs, rhs in
+                    lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+                }
+                .prefix(3)
+                .map { "\($0.value) \($0.key)" }
+        }
+
+        let shown = Array(current.skipped.prefix(3))
         var values = shown.map { $0.promptSummary(current.language) }
         let shownCount = shown.reduce(0) { $0 + $1.count }
-        let total = current.skipped.reduce(0) { $0 + $1.count }
         let remaining = total - shownCount
         if remaining > 0 {
             values.append(current.language == .swedish
@@ -1117,7 +1348,9 @@ final class SuperUploadCoordinator {
     }
 
     private static func errorMessage(_ result: Result<[String: Any], Error>) -> String? {
-        if case .success(let info) = result { return info["error"] as? String }
-        return nil
+        switch result {
+        case .success(let info): return info["error"] as? String
+        case .failure(let error): return error.localizedDescription
+        }
     }
 }

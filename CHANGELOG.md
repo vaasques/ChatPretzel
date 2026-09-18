@@ -1,5 +1,40 @@
 # Release notes
 
+## 0.3.5 — Live gallery verification fix
+
+### Fixed
+
+- Recognise the real sent-image gallery used by ChatGPT, where one generic attachment wrapper contains separate interactive image controls.
+- Continue Super Upload when ChatGPT changes a filename suffix between the composer and the sent message, for example from `image(2).png` to `image(3).png`.
+- Match those website-generated aliases one-to-one against the original batch while keeping genuine numbered filenames and duplicate files distinct.
+- Include content-free live control, image and wrapper counts in a stopped-upload error so a future ChatGPT layout change can be diagnosed without exposing chat text or filenames.
+
+### Verification
+
+- 90 JavaScript adapter regression tests passed, including a ten-image reproduction of the live gallery structure and alias transition that previously produced 0 of 10 verified files.
+- The native AppKit/WebKit harness advanced a 1,500-file selection from batch 1 to batch 2 and completed the 25-file 10 + 10 + 5 flow, delayed final reply, cancellation and background response without action controls.
+- The full XCTest suite remains unavailable with the selected local Command Line Tools because XCTest is not included.
+
+This is a local reliability update. ChatGPT service limits and future website changes can still affect very large uploads.
+
+## 0.3.4 — Super Upload transition fix
+
+### Fixed
+
+- Continue from the first 10 files when ChatGPT keeps an older assistant node while rendering the new completed answer in a different turn shape.
+- Bind role-less transition layouts to the exact submitted user message and exact attachment set without accepting stale or assistant-authored lookalikes.
+- Read sent galleries from the complete conversation turn, including image filenames exposed only through image metadata.
+- Stop safely if WebKit does not return an operation result, without treating an uncertain send as proof that nothing was sent.
+
+### Verification
+
+- 85 JavaScript adapter regression tests passed.
+- A native AppKit/WebKit regression with a 1,500-file selection advanced automatically from files 1–10 to files 11–20 under the reproduced transition layout.
+- Native AppKit/WebKit regressions passed for the complete 25-file 10 + 10 + 5 flow with the window hidden, delayed final reply, cancellation, No sending nothing, and replies without action controls.
+- The full XCTest suite remains unavailable with the selected local Command Line Tools because XCTest is not included.
+
+This is a local reliability update. Live ChatGPT service limits and future website changes can still affect very large uploads.
+
 ## 0.3.3 — Background Super Upload
 
 ### What's new
