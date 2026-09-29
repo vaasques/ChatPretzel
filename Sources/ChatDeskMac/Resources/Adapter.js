@@ -34,7 +34,13 @@
   }
   const href = () => location.href;
   function composer() {
-    return document.querySelector('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, textarea[data-testid="prompt-textarea"], [data-chatdesk-fixture-composer]');
+    const known = document.querySelector('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, textarea[data-testid="prompt-textarea"], [data-chatdesk-fixture-composer]');
+    if (visible(known)) return known;
+    // The current ChatGPT editor is a role=textbox DIV without the old ID.
+    // Only use a unique visible editor, never a modal or an arbitrary field.
+    const editors = Array.from(document.querySelectorAll('[contenteditable="true"][role="textbox"]'))
+      .filter(node => visible(node) && !node.closest?.('[role="dialog"]'));
+    return editors.length === 1 ? editors[0] : null;
   }
   function focusedComposer(c) {
     return !!c && (document.activeElement === c || c.contains(document.activeElement));

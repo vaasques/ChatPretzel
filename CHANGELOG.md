@@ -1,5 +1,32 @@
 # Release notes
 
+## 0.3.7 — Attachment paste and cloud files
+
+### Fixed
+
+- Restore file paste in ChatGPT's current message editor, including layouts without the older editor ID. Ambiguous or modal editors are not used.
+- Resolve native WebKit callbacks directly on the main actor so attachment preparation no longer gets stuck behind an extra task. Timeout handling completes once and ignores late callbacks.
+- Prepare cloud-backed files through macOS file coordination instead of rejecting them merely because they are not downloaded locally. Optional iCloud metadata no longer blocks ordinary file validation.
+- Add cancellation and a two-minute deadline for each coordinated file read, with a status message showing the file being prepared.
+- Keep large-queue preflight metadata-only. Downloading and content preparation are limited to the active batch rather than the entire queue.
+
+Original files and existing composer text are preserved. App Sandbox and user-selected file access remain enabled; folders, app bundles and symbolic links remain rejected.
+
+### Verification
+
+- Six synthetic iCloud-only files (PDF, DOCX, XLSX, PNG, JPG and TXT) were downloaded through one paste into the sandboxed local receiver. All six original-byte SHA-256 checks passed, existing text remained, and no message was sent.
+- The final installed build separately pasted the six iCloud originals into live ChatGPT. All six attachments became ready; no chat prompt was sent.
+- 93 JavaScript regression tests and the native file-access and callback-gate harnesses passed, including cancellation and timeout under a competing coordinated file operation.
+- The full XCTest suite remains unavailable with the selected Command Line Tools because XCTest is not included.
+
+iCloud was tested. Other cloud providers and thousand-file live uploads were not independently verified for this release. ChatGPT's own upload, storage and account limits still apply.
+
+### Installation
+
+Download the DMG, open it, and drag ChatPretzel to Applications. Requires an **Apple Silicon Mac with macOS 13 or later**. This is the same tested 0.3.7 build 30 installed locally, not a new rebuild. It is ad-hoc signed and not notarized; macOS may require approval on first launch. Use password sign-in if passkeys do not work in the embedded web view.
+
+ChatPretzel is an independent, unofficial project, not affiliated with, endorsed by, or sponsored by OpenAI.
+
 ## 0.3.5 — Live gallery verification fix
 
 ### Fixed

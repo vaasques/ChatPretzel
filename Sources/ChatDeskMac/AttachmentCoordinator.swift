@@ -19,6 +19,7 @@ final class AttachmentCoordinator {
     private var preparingID: UUID?
     private var pending: Pending?
     private var timeout: DispatchWorkItem?
+    private var fileRead: FileReadCancellation?
     private var batchCompletionOperationID: UUID?
     private var batchCompletion: ((Result<Int, AttachmentBatchFailure>) -> Void)?
     private var retainedLeases: [UUID: [FileAccessLease]] = [:]
@@ -173,9 +174,24 @@ final class AttachmentCoordinator {
         }
     }
     private func validate(_ leases: [FileAccessLease], completion: @escaping ([Result<CheckedFile, Error>]) -> Void) {
+        let read = FileReadCancellation()
+        fileRead?.cancel(); fileRead = read
+        onNotice?("Preparing selected files. Cloud files may need to download first.")
         io.async {
-            let results = leases.map { lease -> Result<CheckedFile, Error> in Result { try FileValidator.check(lease) } }
-            DispatchQueue.main.async { completion(results) }
+            let results = leases.enumerated().map { index, lease -> Result<CheckedFile, Error> in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.fileRead === read else { return }
+                    self.onNotice?("Preparing file \(index + 1) of \(leases.count). Cloud files may need to download first.")
+                }
+                return Result { try FileValidator.check(lease, cancellation: read) }
+            }
+            DispatchQueue.main.async { [weak self] in
+                if self?.fileRead === read { self?.fileRead = nil }
+                // The caller must still resolve WebKit's open-panel completion
+                // with nil after cancellation/navigation. Its operation guard
+                // prevents a stale validation from handing over any URLs.
+                completion(results)
+            }
         }
     }
     private func addRecords(_ selection: FileSelection) {
@@ -219,6 +235,7 @@ final class AttachmentCoordinator {
         records[index].transition(to: state, detail: detail)
     }
     private func fail(_ operation: UUID, _ message: String) {
+        fileRead?.cancel(); fileRead = nil
         for index in records.indices where records[index].operationID == operation {
             if [.checking, .waitingForWebKit].contains(records[index].state) {
                 records[index].transition(to: .failed, detail: message)
@@ -233,6 +250,7 @@ final class AttachmentCoordinator {
         finishBatch(operation, result: .failure(AttachmentBatchFailure(message: message)))
     }
     func cancel(reason: String = "Cancelled by the user.") {
+        fileRead?.cancel(); fileRead = nil
         let activeOperations = Set(records.filter {
             [.identified, .checking, .waitingForWebKit].contains($0.state)
         }.map(\.operationID))
@@ -255,6 +273,7 @@ final class AttachmentCoordinator {
     }
 
     func cancelSuperUpload(operationID: UUID, reason: String) {
+        fileRead?.cancel(); fileRead = nil
         timeout?.cancel(); timeout = nil
         if preparingID == operationID { preparingID = nil }
         if pending?.selectionID == operationID { pending = nil }

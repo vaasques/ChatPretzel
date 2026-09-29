@@ -67,11 +67,11 @@ final class SuperUploadFileStaging: @unchecked Sendable {
 
     /// Validates and creates only the staged copies needed by one active batch.
     /// Call this on the coordinator's I/O queue.
-    func materialize(_ files: [PlannedFile]) -> [Result<URL, Error>] {
+    func materialize(_ files: [PlannedFile], cancellation: FileReadCancellation? = nil) -> [Result<URL, Error>] {
         files.map { file in
             Result {
                 let lease = FileAccessLease(file.original)
-                _ = try FileValidator.check(lease)
+                _ = try FileValidator.check(lease, cancellation: cancellation)
                 return try withExtendedLifetime(lease) {
                     guard let name = file.stagedName else { return file.original }
                     return try stageDuplicate(file.original, named: name)
@@ -304,6 +304,7 @@ final class SuperUploadCoordinator {
     }
 
     private final class Session {
+        let fileRead = FileReadCancellation()
         let operationID: UUID
         let token: String
         let selectedCount: Int
@@ -370,6 +371,7 @@ final class SuperUploadCoordinator {
         }
 
         deinit {
+            fileRead.cancel()
             if let activity { ProcessInfo.processInfo.endActivity(activity) }
             if #available(macOS 14.0, *), let raw = previousInactiveSchedulingPolicyRawValue,
                let webView, let policy = WKPreferences.InactiveSchedulingPolicy(rawValue: raw) {
@@ -464,11 +466,12 @@ final class SuperUploadCoordinator {
         let end = min(start + Self.preflightChunkSize, current.preflightFiles.count)
         let files = Array(current.preflightFiles[start..<end])
         let token = current.token
+        let fileRead = current.fileRead
         io.async { [weak self] in
             let results = files.map { planned -> PreflightItem in
                 do {
                     let lease = FileAccessLease(planned.original)
-                    let file = try FileValidator.check(lease)
+                    let file = try FileValidator.check(lease, materialize: false, cancellation: fileRead)
                     return PreflightItem(candidate: Candidate(
                         plannedFile: planned,
                         extensionName: file.url.pathExtension.lowercased(),
@@ -601,8 +604,9 @@ final class SuperUploadCoordinator {
         // Duplicate basename copies are materialised only for this one ten-file
         // handoff. A 3,000-file queue therefore has at most ten temporary copies
         // (and ten active security grants) instead of thousands.
+        let fileRead = current.fileRead
         io.async { [weak self] in
-            let materialized = staging.materialize(candidates.map(\.plannedFile))
+            let materialized = staging.materialize(candidates.map(\.plannedFile), cancellation: fileRead)
             DispatchQueue.main.async {
                 guard let self, let active = self.session, active.token == token else { return }
                 var urls: [URL] = []
@@ -1140,6 +1144,7 @@ final class SuperUploadCoordinator {
     }
 
     private func releaseExecutionResources(_ current: Session) {
+        current.fileRead.cancel()
         if let activity = current.activity {
             ProcessInfo.processInfo.endActivity(activity)
             current.activity = nil

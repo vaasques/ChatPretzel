@@ -8,7 +8,7 @@ final class WebAdapter {
     /// Keep a one-shot gate on the main actor so a timed-out Super Upload state
     /// query unlocks safely instead of leaving the native interaction shield up
     /// forever. Late WebKit callbacks are deliberately ignored.
-    private final class CallGate {
+    final class CallGate {
         private var completed = false
         private var watchdog: DispatchWorkItem?
         private let completion: (Result<[String: Any], Error>) -> Void
@@ -20,7 +20,7 @@ final class WebAdapter {
         func startWatchdog(after timeout: TimeInterval, method: String) {
             guard timeout > 0 else { return }
             let work = DispatchWorkItem { [weak self] in
-                Task { @MainActor in
+                DispatchQueue.main.async {
                     self?.finish(.failure(AdapterError.timedOut(method)))
                 }
             }
@@ -64,15 +64,15 @@ final class WebAdapter {
         webView.callAsyncJavaScript(
             "if (!globalThis.ChatDeskAdapter) return {ok:false,error:'The adapter is missing from the page'}; return globalThis.ChatDeskAdapter[method](args);",
             arguments: ["method": method, "args": arguments], in: nil, in: Self.world) { result in
-                Task { @MainActor in
-                    switch result {
-                    case .success(let value):
-                        guard let dictionary = value as? [String: Any] else {
-                            gate.finish(.failure(AdapterError.invalidResult)); return
-                        }
-                        gate.finish(.success(dictionary))
-                    case .failure(let error): gate.finish(.failure(error))
+                // WebKit already delivers this callback on MainActor. An extra
+                // Task can stall behind the synchronous AppKit application loop.
+                switch result {
+                case .success(let value):
+                    guard let dictionary = value as? [String: Any] else {
+                        gate.finish(.failure(AdapterError.invalidResult)); return
                     }
+                    gate.finish(.success(dictionary))
+                case .failure(let error): gate.finish(.failure(error))
                 }
             }
     }

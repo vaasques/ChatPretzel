@@ -164,6 +164,29 @@ function environment({host='chatgpt.com',inputs=[{}],focused=true,selectionText=
 const files=[{extension:'pdf',mime:'application/pdf'},{extension:'png',mime:'image/png'}];
 test('Does not install on an untrusted host',()=>assert.equal(environment({host:'evil.test'}).adapter,undefined));
 test('Preserves ordinary composer text',()=>{const e=environment();assert.equal(e.adapter.getDraft().text,'keep');});
+function replaceLegacyComposer(e, editors) {
+  const query = e.document.querySelector.bind(e.document);
+  const queryAll = e.document.querySelectorAll.bind(e.document);
+  e.document.querySelector = selector => selector.includes('#prompt-textarea') ? null : query(selector);
+  e.document.querySelectorAll = selector => selector === '[contenteditable="true"][role="textbox"]' ? editors : queryAll(selector);
+}
+test('Current ID-less textbox composer accepts focused file paste',()=>{
+  const e=environment(); replaceLegacyComposer(e,[e.composer]);
+  assert.equal(e.adapter.context().hasComposer,true);
+  assert.equal(e.adapter.context().focused,true);
+  assert.equal(e.adapter.prepareFiles({token:'op',files,requireFocus:true}).ok,true);
+});
+test('ID-less composer fallback refuses multiple visible editors',()=>{
+  const e=environment(); replaceLegacyComposer(e,[e.composer,{...e.composer}]);
+  assert.equal(e.adapter.context().hasComposer,false);
+  assert.equal(e.adapter.prepareFiles({token:'op',files,requireFocus:true}).ok,false);
+});
+test('ID-less composer fallback ignores hidden and modal editors',()=>{
+  const e=environment(); replaceLegacyComposer(e,[e.composer,{...e.composer,hidden:true},
+    {...e.composer,closest:()=>({})}]);
+  assert.equal(e.adapter.context().focused,true);
+  assert.equal(e.adapter.prepareFiles({token:'op',files,requireFocus:true}).ok,true);
+});
 test('One eligible input prepares entire mixed batch without clicking',()=>{const e=environment();assert.equal(e.adapter.prepareFiles({token:'op',files,requireFocus:true}).ok,true);assert.equal(e.calls.length,0);});
 test('Requires focused composer for paste',()=>{const e=environment({focused:false});assert.equal(e.adapter.prepareFiles({token:'op',files,requireFocus:true}).ok,false);});
 test('Rejects single-file controls for a batch',()=>{const e=environment({inputs:[{multiple:false}]});assert.equal(e.adapter.prepareFiles({token:'op',files}).ok,false);});
